@@ -10,6 +10,9 @@
 #include <linux/slab.h>
 #include <linux/string.h>
 
+#include "lua_depth_test.h"
+#include "lua_work_test.h"
+
 enum lua_kunit_result_kind {
 	LUA_KUNIT_STRING,
 	LUA_KUNIT_STRING_CONTAINS,
@@ -45,6 +48,8 @@ struct lua_kunit_vector {
 	struct lua_kunit_expected_result expected[4];
 	size_t expected_count;
 };
+
+#define LUA_SOURCE_A_16	"aaaaaaaaaaaaaaaa"
 
 #define LUA_POSITION_CAPTURES_8	"()()()()()()()()"
 #define LUA_POSITION_CAPTURES_32	(LUA_POSITION_CAPTURES_8 \
@@ -732,6 +737,905 @@ static void lua_string_malformed_pattern_test(struct kunit *test)
 			      ARRAY_SIZE(malformed_vectors));
 }
 
+static int lua_kunit_attach_work(lua_State *L)
+{
+	lua_work_observe(L, lua_touserdata(L, 1));
+	return 0;
+}
+
+static void lua_kunit_log_work(struct kunit *test, const char *id,
+			       unsigned int operation, const struct lua_work_record *r)
+{
+	/* Development observations; order is StrWorkKind, not a public ABI. */
+	char counts[SW_KINDS * 21];
+	size_t used = 0;
+	int k;
+
+	for (k = 0; k < SW_KINDS; k++)
+		used += scnprintf(counts + used, sizeof(counts) - used,
+				  "%s%llu", k ? "," : "", r->count[k]);
+	kunit_info(test, "work-count %s op=%u api=%d total=%llu finished=%d counts=%s\n",
+		   id, operation, r->api, r->total, r->finished, counts);
+}
+
+static void lua_string_work_behavior_test(struct kunit *test)
+{
+	static const struct {
+		const struct lua_kunit_vector *vectors;
+		size_t count;
+	} groups[] = {
+		{ basic_vectors, ARRAY_SIZE(basic_vectors) },
+		{ plain_find_vectors, ARRAY_SIZE(plain_find_vectors) },
+		{ search_path_vectors, ARRAY_SIZE(search_path_vectors) },
+		{ class_balance_vectors, ARRAY_SIZE(class_balance_vectors) },
+		{ capture_vectors, ARRAY_SIZE(capture_vectors) },
+		{ iterator_vectors, ARRAY_SIZE(iterator_vectors) },
+		{ gsub_vectors, ARRAY_SIZE(gsub_vectors) },
+		{ malformed_vectors, ARRAY_SIZE(malformed_vectors) },
+	};
+	struct lua_work_observer *observer;
+	lua_State *L;
+	size_t g, v;
+	unsigned int i;
+
+	observer = kunit_kzalloc(test, sizeof(*observer), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, observer);
+	L = lua_kunit_new_state(test);
+	lua_kunit_open_library(test, L, luaopen_base, "");
+	lua_kunit_open_library(test, L, luaopen_string_work, LUA_STRLIBNAME);
+	lua_pushcfunction(L, lua_kunit_attach_work);
+	lua_pushlightuserdata(L, observer);
+	KUNIT_ASSERT_EQ(test, lua_pcall(L, 1, 0, 0), 0);
+	for (g = 0; g < ARRAY_SIZE(groups); g++) {
+		for (v = 0; v < groups[g].count; v++) {
+			memset(observer, 0, sizeof(*observer));
+			KUNIT_EXPECT_TRUE_MSG(test,
+				lua_kunit_run_vector(test, L, &groups[g].vectors[v]),
+				"observed %s", groups[g].vectors[v].id);
+			KUNIT_EXPECT_FALSE(test, observer->full);
+			KUNIT_EXPECT_GT(test, observer->used, 0U);
+			for (i = 0; i < observer->used; i++) {
+				KUNIT_EXPECT_FALSE(test, observer->records[i].overflow);
+				lua_kunit_log_work(test, groups[g].vectors[v].id,
+						   i, &observer->records[i]);
+			}
+		}
+	}
+	lua_work_observe(L, NULL);
+}
+
+static int lua_kunit_invoke_depth_retry(lua_State *L)
+{
+	int status;
+	int i;
+
+	lua_kunit_push_string_function(L, "gmatch");
+	lua_pushliteral(L, "aaaaaaaab");
+	lua_pushliteral(L, "a?a?a?a?a?a?a?a?b");
+	status = lua_pcall(L, 2, 1, 0);
+	if (status)
+		return status;
+	for (i = 0; i < 2; i++) {
+		lua_pushvalue(L, 1);
+		status = lua_pcall(L, 0, 1, 0);
+		if (status != LUA_ERRRUN)
+			return status ? status : LUA_ERRRUN;
+	}
+	lua_remove(L, 1);
+	lua_kunit_push_string_function(L, "match");
+	lua_pushliteral(L, "ab");
+	lua_pushliteral(L, "a?b");
+	return lua_pcall(L, 2, 1, 0);
+}
+
+static int lua_kunit_invoke_depth_iteration(lua_State *L)
+{
+	bool all_match = true;
+	int status;
+	int i;
+
+	lua_kunit_push_string_function(L, "gmatch");
+	lua_pushliteral(L, "abababababababababababab");
+	lua_pushliteral(L, "a?b");
+	status = lua_pcall(L, 2, 1, 0);
+	if (status)
+		return status;
+	for (i = 0; i < 13; i++) {
+		lua_settop(L, 1);
+		lua_pushvalue(L, 1);
+		status = lua_pcall(L, 0, LUA_MULTRET, 0);
+		if (status)
+			return status;
+		if (i == 12) {
+			all_match &= lua_gettop(L) == 1;
+		} else if (lua_gettop(L) != 2 || lua_type(L, 2) != LUA_TSTRING ||
+			   strcmp(lua_tostring(L, 2), "ab")) {
+			all_match = false;
+		}
+	}
+	lua_settop(L, 0);
+	lua_pushboolean(L, all_match);
+	return 0;
+}
+
+static const struct lua_kunit_vector depth_optional_vectors[] = {
+	{
+		.id = "DO6",
+		.chunk = "return string.match(string.rep('a', 6) .. 'b', '^' ..\n"
+			 "string.rep('a?', 6) .. 'b')",
+		.expected = {
+			LUA_EXPECT_STRING("aaaaaab"),
+		},
+		.expected_count = 1,
+	},
+	{
+		.id = "DO7",
+		.chunk = "return string.match(string.rep('a', 7) .. 'b', '^' ..\n"
+			 "string.rep('a?', 7) .. 'b')",
+		.expected = {
+			LUA_EXPECT_STRING("aaaaaaab"),
+		},
+		.expected_count = 1,
+	},
+	{
+		.id = "DO8",
+		.chunk = "local ok, err = pcall(string.match, 'aaaaaaaab', '^' ..\n"
+			 "string.rep('a?', 8) .. 'b'); return ok, err,\n"
+			 "string.match('abc123', '(%a+)(%d+)')",
+		.expected = {
+			LUA_EXPECT_BOOLEAN(false),
+			LUA_EXPECT_STRING_CONTAINS("pattern recursion limit exceeded"),
+			LUA_EXPECT_STRING("abc"),
+			LUA_EXPECT_STRING("123"),
+		},
+		.expected_count = 4,
+	},
+	{
+		.id = "DO-fail",
+		.chunk = "return string.match('aaaaaaa', '^' .. string.rep('a?', 7) ..\n"
+			 "'b')",
+		.expected = {
+			LUA_EXPECT_NIL(),
+		},
+		.expected_count = 1,
+	},
+	{
+		.id = "DO-fallback",
+		.chunk = "return string.match('a', '^a?a$')",
+		.expected = {
+			LUA_EXPECT_STRING("a"),
+		},
+		.expected_count = 1,
+	},
+};
+
+static const struct lua_kunit_vector depth_capture_vectors[] = {
+	{
+		.id = "DC-position7",
+		.chunk = "return select('#', string.match('', string.rep('()', 7))),\n"
+			 "string.match('', '()')",
+		.expected = {
+			LUA_EXPECT_INTEGER(7),
+			LUA_EXPECT_INTEGER(1),
+		},
+		.expected_count = 2,
+	},
+	{
+		.id = "DC-position8",
+		.chunk = "local ok, err = pcall(string.match, '', string.rep('()', 8));\n"
+			 "return ok, err, string.match('abc123', '(%a+)(%d+)')",
+		.expected = {
+			LUA_EXPECT_BOOLEAN(false),
+			LUA_EXPECT_STRING_CONTAINS("pattern recursion limit exceeded"),
+			LUA_EXPECT_STRING("abc"),
+			LUA_EXPECT_STRING("123"),
+		},
+		.expected_count = 4,
+	},
+	{
+		.id = "DC-normal3",
+		.chunk = "return string.match('aaa', '(a)(a)(a)')",
+		.expected = {
+			LUA_EXPECT_STRING("a"),
+			LUA_EXPECT_STRING("a"),
+			LUA_EXPECT_STRING("a"),
+		},
+		.expected_count = 3,
+	},
+	{
+		.id = "DC-normal4",
+		.chunk = "local ok, err = pcall(string.match, 'aaaa', '(a)(a)(a)(a)');\n"
+			 "return ok, err, string.match('abc123', '(%a+)(%d+)')",
+		.expected = {
+			LUA_EXPECT_BOOLEAN(false),
+			LUA_EXPECT_STRING_CONTAINS("pattern recursion limit exceeded"),
+			LUA_EXPECT_STRING("abc"),
+			LUA_EXPECT_STRING("123"),
+		},
+		.expected_count = 4,
+	},
+	{
+		.id = "DC-nested3",
+		.chunk = "return string.match('a', '(((a)))')",
+		.expected = {
+			LUA_EXPECT_STRING("a"),
+			LUA_EXPECT_STRING("a"),
+			LUA_EXPECT_STRING("a"),
+		},
+		.expected_count = 3,
+	},
+	{
+		.id = "DC-nested4",
+		.chunk = "local ok, err = pcall(string.match, 'a', '((((a))))'); return\n"
+			 "ok, err, string.match('abc123', '(%a+)(%d+)')",
+		.expected = {
+			LUA_EXPECT_BOOLEAN(false),
+			LUA_EXPECT_STRING_CONTAINS("pattern recursion limit exceeded"),
+			LUA_EXPECT_STRING("abc"),
+			LUA_EXPECT_STRING("123"),
+		},
+		.expected_count = 4,
+	},
+};
+
+static const struct lua_kunit_vector depth_expand_vectors[] = {
+	{
+		.id = "DX-greedy7",
+		.chunk = "return string.match('', '^' .. string.rep('a*', 7) .. '$')",
+		.expected = {
+			LUA_EXPECT_STRING(""),
+		},
+		.expected_count = 1,
+	},
+	{
+		.id = "DX-greedy8",
+		.chunk = "local ok, err = pcall(string.match, '', '^' .. string.rep('a*',\n"
+			 "8) .. '$'); return ok, err, string.match('abc123', '(%a+)(%d+)')",
+		.expected = {
+			LUA_EXPECT_BOOLEAN(false),
+			LUA_EXPECT_STRING_CONTAINS("pattern recursion limit exceeded"),
+			LUA_EXPECT_STRING("abc"),
+			LUA_EXPECT_STRING("123"),
+		},
+		.expected_count = 4,
+	},
+	{
+		.id = "DX-greedy-fail",
+		.chunk = "return string.match('aaaa', '^a*a*b$')",
+		.expected = {
+			LUA_EXPECT_NIL(),
+		},
+		.expected_count = 1,
+	},
+	{
+		.id = "DX-greedy-backtrack",
+		.chunk = "return string.match('aaaa', '^a*a$')",
+		.expected = {
+			LUA_EXPECT_STRING("aaaa"),
+		},
+		.expected_count = 1,
+	},
+	{
+		.id = "DX-minimal7",
+		.chunk = "return string.match('', '^' .. string.rep('a-', 7) .. '$')",
+		.expected = {
+			LUA_EXPECT_STRING(""),
+		},
+		.expected_count = 1,
+	},
+	{
+		.id = "DX-minimal8",
+		.chunk = "local ok, err = pcall(string.match, '', '^' .. string.rep('a-',\n"
+			 "8) .. '$'); return ok, err, string.match('abc123', '(%a+)(%d+)')",
+		.expected = {
+			LUA_EXPECT_BOOLEAN(false),
+			LUA_EXPECT_STRING_CONTAINS("pattern recursion limit exceeded"),
+			LUA_EXPECT_STRING("abc"),
+			LUA_EXPECT_STRING("123"),
+		},
+		.expected_count = 4,
+	},
+	{
+		.id = "DX-minimal-fail",
+		.chunk = "return string.match('aaaa', '^a-a-b$')",
+		.expected = {
+			LUA_EXPECT_NIL(),
+		},
+		.expected_count = 1,
+	},
+	{
+		.id = "DX-minimal-backtrack",
+		.chunk = "return string.match('aaaa', '^a-a$')",
+		.expected = {
+			LUA_EXPECT_STRING("aaaa"),
+		},
+		.expected_count = 1,
+	},
+	{
+		.id = "DX-plus7",
+		.chunk = "return string.match('aaaaaaa', '^' .. string.rep('a+', 7) ..\n"
+			 "'$')",
+		.expected = {
+			LUA_EXPECT_STRING("aaaaaaa"),
+		},
+		.expected_count = 1,
+	},
+	{
+		.id = "DX-plus8",
+		.chunk = "local ok, err = pcall(string.match, 'aaaaaaaa', '^' ..\n"
+			 "string.rep('a+', 8) .. '$'); return ok, err,\n"
+			 "string.match('abc123', '(%a+)(%d+)')",
+		.expected = {
+			LUA_EXPECT_BOOLEAN(false),
+			LUA_EXPECT_STRING_CONTAINS("pattern recursion limit exceeded"),
+			LUA_EXPECT_STRING("abc"),
+			LUA_EXPECT_STRING("123"),
+		},
+		.expected_count = 4,
+	},
+	{
+		.id = "DX-plus-fail",
+		.chunk = "return string.match('aaaa', '^a+a+b$')",
+		.expected = {
+			LUA_EXPECT_NIL(),
+		},
+		.expected_count = 1,
+	},
+	{
+		.id = "DX-plus-backtrack",
+		.chunk = "return string.match('aaaa', '^a+a$')",
+		.expected = {
+			LUA_EXPECT_STRING("aaaa"),
+		},
+		.expected_count = 1,
+	},
+	{
+		.id = "DX-plus-empty",
+		.chunk = "return string.match('', 'a+')",
+		.expected = {
+			LUA_EXPECT_NIL(),
+		},
+		.expected_count = 1,
+	},
+};
+
+static const struct lua_kunit_vector depth_api_vectors[] = {
+	{
+		.id = "DA-find",
+		.chunk = "local ok, err = pcall(string.find, 'aaaaaaaab', '^' ..\n"
+			 "string.rep('a?', 8) .. 'b'); return ok, err,\n"
+			 "string.match('abc123', '(%a+)(%d+)')",
+		.expected = {
+			LUA_EXPECT_BOOLEAN(false),
+			LUA_EXPECT_STRING_CONTAINS("pattern recursion limit exceeded"),
+			LUA_EXPECT_STRING("abc"),
+			LUA_EXPECT_STRING("123"),
+		},
+		.expected_count = 4,
+	},
+	{
+		.id = "DA-find-ok",
+		.chunk = "return string.find('aaaaaaab', '^' .. string.rep('a?', 7) ..\n"
+			 "'b')",
+		.expected = {
+			LUA_EXPECT_INTEGER(1),
+			LUA_EXPECT_INTEGER(8),
+		},
+		.expected_count = 2,
+	},
+	{
+		.id = "DA-plain",
+		.chunk = "return string.find('a?a?a?a?a?a?a?a?', string.rep('a?', 8), 1,\n"
+			 "true)",
+		.expected = {
+			LUA_EXPECT_INTEGER(1),
+			LUA_EXPECT_INTEGER(16),
+		},
+		.expected_count = 2,
+	},
+	{
+		.id = "DA-gmatch",
+		.chunk = "local ok, err = pcall(string.gmatch('aaaaaaaab',\n"
+			 "string.rep('a?', 8) .. 'b')); return ok, err,\n"
+			 "string.match('abc123', '(%a+)(%d+)')",
+		.expected = {
+			LUA_EXPECT_BOOLEAN(false),
+			LUA_EXPECT_STRING_CONTAINS("pattern recursion limit exceeded"),
+			LUA_EXPECT_STRING("abc"),
+			LUA_EXPECT_STRING("123"),
+		},
+		.expected_count = 4,
+	},
+	{
+		.id = "DA-gmatch-ok",
+		.chunk = "return string.gmatch('aaaaaaab', string.rep('a?', 7) .. 'b')()",
+		.expected = {
+			LUA_EXPECT_STRING("aaaaaaab"),
+		},
+		.expected_count = 1,
+	},
+	{
+		.id = "DA-gfind",
+		.chunk = "local ok, err = pcall(string.gfind('aaaaaaaab', string.rep('a?',\n"
+			 "8) .. 'b')); return ok, err, string.match('abc123',\n"
+			 "'(%a+)(%d+)')",
+		.expected = {
+			LUA_EXPECT_BOOLEAN(false),
+			LUA_EXPECT_STRING_CONTAINS("pattern recursion limit exceeded"),
+			LUA_EXPECT_STRING("abc"),
+			LUA_EXPECT_STRING("123"),
+		},
+		.expected_count = 4,
+	},
+	{
+		.id = "DA-gfind-ok",
+		.chunk = "return string.gfind('aaaaaaab', string.rep('a?', 7) .. 'b')()",
+		.expected = {
+			LUA_EXPECT_STRING("aaaaaaab"),
+		},
+		.expected_count = 1,
+	},
+	{
+		.id = "DA-gsub",
+		.chunk = "local ok, err = pcall(string.gsub, 'aaaaaaaab', '^' ..\n"
+			 "string.rep('a?', 8) .. 'b', 'X'); return ok, err,\n"
+			 "string.match('abc123', '(%a+)(%d+)')",
+		.expected = {
+			LUA_EXPECT_BOOLEAN(false),
+			LUA_EXPECT_STRING_CONTAINS("pattern recursion limit exceeded"),
+			LUA_EXPECT_STRING("abc"),
+			LUA_EXPECT_STRING("123"),
+		},
+		.expected_count = 4,
+	},
+	{
+		.id = "DA-gsub-ok",
+		.chunk = "return string.gsub('aaaaaaab', '^' .. string.rep('a?', 7) ..\n"
+			 "'b', 'X')",
+		.expected = {
+			LUA_EXPECT_STRING("X"),
+			LUA_EXPECT_INTEGER(1),
+		},
+		.expected_count = 2,
+	},
+	{
+		.id = "DA-iterator-later",
+		.chunk = "local it = string.gmatch('baaaaaaaab', string.rep('a?', 8) ..\n"
+			 "'b'); local first = it(); local ok, err = pcall(it); return\n"
+			 "first, ok, err, string.match('ab', 'a?b')",
+		.expected = {
+			LUA_EXPECT_STRING("b"),
+			LUA_EXPECT_BOOLEAN(false),
+			LUA_EXPECT_STRING_CONTAINS("pattern recursion limit exceeded"),
+			LUA_EXPECT_STRING("ab"),
+		},
+		.expected_count = 4,
+	},
+	{
+		.id = "DA-iterator-retry",
+		.invoke = lua_kunit_invoke_depth_retry,
+		.expected = {
+			LUA_EXPECT_STRING_CONTAINS("pattern recursion limit exceeded"),
+			LUA_EXPECT_STRING_CONTAINS("pattern recursion limit exceeded"),
+			LUA_EXPECT_STRING("ab"),
+		},
+		.expected_count = 3,
+	},
+};
+
+static const struct lua_kunit_vector depth_recovery_vectors[] = {
+	{
+		.id = "DR-search",
+		.chunk = "return string.match(string.rep('a', 16) .. 'b', 'a?b')",
+		.expected = {
+			LUA_EXPECT_STRING("ab"),
+		},
+		.expected_count = 1,
+	},
+	{
+		.id = "DR-iteration",
+		.invoke = lua_kunit_invoke_depth_iteration,
+		.expected = { LUA_EXPECT_BOOLEAN(true) },
+		.expected_count = 1,
+	},
+	{
+		.id = "DR-replacements",
+		.chunk = "return string.gsub(string.rep('ab', 12), 'a?b', 'X')",
+		.expected = {
+			LUA_EXPECT_STRING("XXXXXXXXXXXX"),
+			LUA_EXPECT_INTEGER(12),
+		},
+		.expected_count = 2,
+	},
+	{
+		.id = "DR-class",
+		.chunk = "local ok, err = pcall(string.match, 'aaa', 'a?a?a?['); return\n"
+			 "ok, err, string.match('abc123', '(%a+)(%d+)')",
+		.expected = {
+			LUA_EXPECT_BOOLEAN(false),
+			LUA_EXPECT_STRING_CONTAINS("malformed pattern (missing ']')"),
+			LUA_EXPECT_STRING("abc"),
+			LUA_EXPECT_STRING("123"),
+		},
+		.expected_count = 4,
+	},
+	{
+		.id = "DR-unfinished",
+		.chunk = "local ok, err = pcall(string.match, 'aaa', 'a?a?a?('); return\n"
+			 "ok, err, string.match('abc123', '(%a+)(%d+)')",
+		.expected = {
+			LUA_EXPECT_BOOLEAN(false),
+			LUA_EXPECT_STRING_CONTAINS("unfinished capture"),
+			LUA_EXPECT_STRING("abc"),
+			LUA_EXPECT_STRING("123"),
+		},
+		.expected_count = 4,
+	},
+	{
+		.id = "DR-invalid",
+		.chunk = "local ok, err = pcall(string.match, 'aaa', 'a?a?a?%1'); return\n"
+			 "ok, err, string.match('abc123', '(%a+)(%d+)')",
+		.expected = {
+			LUA_EXPECT_BOOLEAN(false),
+			LUA_EXPECT_STRING_CONTAINS("invalid capture index"),
+			LUA_EXPECT_STRING("abc"),
+			LUA_EXPECT_STRING("123"),
+		},
+		.expected_count = 4,
+	},
+	{
+		.id = "DR-close",
+		.chunk = "local ok, err = pcall(string.match, 'aaa', 'a?a?a?)'); return\n"
+			 "ok, err, string.match('abc123', '(%a+)(%d+)')",
+		.expected = {
+			LUA_EXPECT_BOOLEAN(false),
+			LUA_EXPECT_STRING_CONTAINS("invalid pattern capture"),
+			LUA_EXPECT_STRING("abc"),
+			LUA_EXPECT_STRING("123"),
+		},
+		.expected_count = 4,
+	},
+	{
+		.id = "DR-balance",
+		.chunk = "local ok, err = pcall(string.match, 'aaa', 'a?a?a?%b'); return\n"
+			 "ok, err, string.match('abc123', '(%a+)(%d+)')",
+		.expected = {
+			LUA_EXPECT_BOOLEAN(false),
+			LUA_EXPECT_STRING_CONTAINS("unbalanced pattern"),
+			LUA_EXPECT_STRING("abc"),
+			LUA_EXPECT_STRING("123"),
+		},
+		.expected_count = 4,
+	},
+	{
+		.id = "DR-frontier",
+		.chunk = "local ok, err = pcall(string.match, 'aaa', 'a?a?a?%f'); return\n"
+			 "ok, err, string.match('abc123', '(%a+)(%d+)')",
+		.expected = {
+			LUA_EXPECT_BOOLEAN(false),
+			LUA_EXPECT_STRING_CONTAINS("missing"),
+			LUA_EXPECT_STRING("abc"),
+			LUA_EXPECT_STRING("123"),
+		},
+		.expected_count = 4,
+	},
+	{
+		.id = "DR-callback",
+		.chunk = "return string.gsub('xxx', 'x', function() local ok, err =\n"
+			 "pcall(string.match, 'aaaaaaaa', string.rep('a?', 8)); assert(not\n"
+			 "ok and string.find(err, 'pattern recursion limit exceeded', 1,\n"
+			 "true)); return string.match('ab', 'a?b') end)",
+		.expected = {
+			LUA_EXPECT_STRING("ababab"),
+			LUA_EXPECT_INTEGER(3),
+		},
+		.expected_count = 2,
+	},
+	{
+		.id = "DR-table",
+		.chunk = "return string.gsub('xxx', 'x', setmetatable({}, {__index =\n"
+			 "function() local ok, err = pcall(string.match, 'aaaaaaaa',\n"
+			 "string.rep('a?', 8)); assert(not ok and string.find(err,\n"
+			 "'pattern recursion limit exceeded', 1, true)); return\n"
+			 "string.match('ab', 'a?b') end}))",
+		.expected = {
+			LUA_EXPECT_STRING("ababab"),
+			LUA_EXPECT_INTEGER(3),
+		},
+		.expected_count = 2,
+	},
+};
+
+static const struct lua_kunit_vector depth_candidate_vectors[] = {
+	{
+		.id = "DP-position33",
+		.chunk = "local ok, err = pcall(string.match, '', string.rep('()', 33));\n"
+			 "return ok, err, string.match('abc123', '(%a+)(%d+)')",
+		.expected = {
+			LUA_EXPECT_BOOLEAN(false),
+			LUA_EXPECT_STRING_CONTAINS("too many captures"),
+			LUA_EXPECT_STRING("abc"),
+			LUA_EXPECT_STRING("123"),
+		},
+		.expected_count = 4,
+	},
+	{
+		.id = "DP-normal33",
+		.chunk = "local ok, err = pcall(string.match, string.rep('a', 33),\n"
+			 "string.rep('(a)', 33)); return ok, err, string.match('abc123',\n"
+			 "'(%a+)(%d+)')",
+		.expected = {
+			LUA_EXPECT_BOOLEAN(false),
+			LUA_EXPECT_STRING_CONTAINS("too many captures"),
+			LUA_EXPECT_STRING("abc"),
+			LUA_EXPECT_STRING("123"),
+		},
+		.expected_count = 4,
+	},
+	{
+		.id = "DP-optional64",
+		.chunk = "return string.match(string.rep('a', 64) .. 'b', '^' ..\n"
+			 "string.rep('a?', 64) .. 'b')",
+		.expected = {
+			LUA_EXPECT_STRING(LUA_SOURCE_A_16 LUA_SOURCE_A_16
+					  LUA_SOURCE_A_16 LUA_SOURCE_A_16 "b"),
+		},
+		.expected_count = 1,
+	},
+	{
+		.id = "DP-optional65",
+		.chunk = "local ok, err = pcall(string.match, string.rep('a', 65) .. 'b',\n"
+			 "'^' .. string.rep('a?', 65) .. 'b'); return ok, err,\n"
+			 "string.match('abc123', '(%a+)(%d+)')",
+		.expected = {
+			LUA_EXPECT_BOOLEAN(false),
+			LUA_EXPECT_STRING_CONTAINS("pattern recursion limit exceeded"),
+			LUA_EXPECT_STRING("abc"),
+			LUA_EXPECT_STRING("123"),
+		},
+		.expected_count = 4,
+	},
+	{
+		.id = "DP-greedy64",
+		.chunk = "return string.match('', '^' .. string.rep('a*', 64) .. '$')",
+		.expected = {
+			LUA_EXPECT_STRING(""),
+		},
+		.expected_count = 1,
+	},
+	{
+		.id = "DP-greedy65",
+		.chunk = "local ok, err = pcall(string.match, '', '^' .. string.rep('a*',\n"
+			 "65) .. '$'); return ok, err, string.match('abc123',\n"
+			 "'(%a+)(%d+)')",
+		.expected = {
+			LUA_EXPECT_BOOLEAN(false),
+			LUA_EXPECT_STRING_CONTAINS("pattern recursion limit exceeded"),
+			LUA_EXPECT_STRING("abc"),
+			LUA_EXPECT_STRING("123"),
+		},
+		.expected_count = 4,
+	},
+	{
+		.id = "DP-minimal64",
+		.chunk = "return string.match('', '^' .. string.rep('a-', 64) .. '$')",
+		.expected = {
+			LUA_EXPECT_STRING(""),
+		},
+		.expected_count = 1,
+	},
+	{
+		.id = "DP-minimal65",
+		.chunk = "local ok, err = pcall(string.match, '', '^' .. string.rep('a-',\n"
+			 "65) .. '$'); return ok, err, string.match('abc123',\n"
+			 "'(%a+)(%d+)')",
+		.expected = {
+			LUA_EXPECT_BOOLEAN(false),
+			LUA_EXPECT_STRING_CONTAINS("pattern recursion limit exceeded"),
+			LUA_EXPECT_STRING("abc"),
+			LUA_EXPECT_STRING("123"),
+		},
+		.expected_count = 4,
+	},
+	{
+		.id = "DP-gsub64",
+		.chunk = "return string.gsub('', string.rep('a*', 64), 'X')",
+		.expected = {
+			LUA_EXPECT_STRING("X"),
+			LUA_EXPECT_INTEGER(1),
+		},
+		.expected_count = 2,
+	},
+	{
+		.id = "DP-gsub65",
+		.chunk = "local ok, err = pcall(string.gsub, '', string.rep('a*', 65), 'X');\n"
+			 "return ok, err, string.match('abc123', '(%a+)(%d+)')",
+		.expected = {
+			LUA_EXPECT_BOOLEAN(false),
+			LUA_EXPECT_STRING_CONTAINS("pattern recursion limit exceeded"),
+			LUA_EXPECT_STRING("abc"),
+			LUA_EXPECT_STRING("123"),
+		},
+		.expected_count = 4,
+	},
+	{
+		.id = "DP-gmatch64",
+		.chunk = "return string.gmatch('', string.rep('a*', 64))()",
+		.expected = {
+			LUA_EXPECT_STRING(""),
+		},
+		.expected_count = 1,
+	},
+	{
+		.id = "DP-gmatch65",
+		.chunk = "local ok, err = pcall(string.gmatch('', string.rep('a*', 65)));\n"
+			 "return ok, err, string.match('abc123', '(%a+)(%d+)')",
+		.expected = {
+			LUA_EXPECT_BOOLEAN(false),
+			LUA_EXPECT_STRING_CONTAINS("pattern recursion limit exceeded"),
+			LUA_EXPECT_STRING("abc"),
+			LUA_EXPECT_STRING("123"),
+		},
+		.expected_count = 4,
+	},
+	{
+		.id = "DP-find64",
+		.chunk = "return string.find('', string.rep('a*', 64))",
+		.expected = {
+			LUA_EXPECT_INTEGER(1),
+			LUA_EXPECT_INTEGER(0),
+		},
+		.expected_count = 2,
+	},
+	{
+		.id = "DP-find65",
+		.chunk = "local ok, err = pcall(string.find, '', string.rep('a*', 65));\n"
+			 "return ok, err, string.match('abc123', '(%a+)(%d+)')",
+		.expected = {
+			LUA_EXPECT_BOOLEAN(false),
+			LUA_EXPECT_STRING_CONTAINS("pattern recursion limit exceeded"),
+			LUA_EXPECT_STRING("abc"),
+			LUA_EXPECT_STRING("123"),
+		},
+		.expected_count = 4,
+	},
+};
+
+static lua_State *lua_kunit_new_depth_state(struct kunit *test)
+{
+	lua_State *L = lua_kunit_new_state(test);
+
+	lua_kunit_open_library(test, L, luaopen_base, "");
+	lua_kunit_open_library(test, L, luaopen_string_small_depth, LUA_STRLIBNAME);
+	return L;
+}
+
+static void lua_string_depth_optional_test(struct kunit *test)
+{
+	lua_State *L = lua_kunit_new_depth_state(test);
+
+	lua_kunit_run_vectors(test, L, depth_optional_vectors,
+			      ARRAY_SIZE(depth_optional_vectors));
+}
+
+static void lua_string_depth_capture_test(struct kunit *test)
+{
+	lua_State *L = lua_kunit_new_depth_state(test);
+
+	lua_kunit_run_vectors(test, L, depth_capture_vectors,
+			      ARRAY_SIZE(depth_capture_vectors));
+}
+
+static void lua_string_depth_expand_test(struct kunit *test)
+{
+	lua_State *L = lua_kunit_new_depth_state(test);
+
+	lua_kunit_run_vectors(test, L, depth_expand_vectors,
+			      ARRAY_SIZE(depth_expand_vectors));
+}
+
+static void lua_string_depth_api_test(struct kunit *test)
+{
+	lua_State *L = lua_kunit_new_depth_state(test);
+
+	lua_kunit_run_vectors(test, L, depth_api_vectors,
+			      ARRAY_SIZE(depth_api_vectors));
+}
+
+static void lua_string_depth_recovery_test(struct kunit *test)
+{
+	lua_State *L = lua_kunit_new_depth_state(test);
+
+	lua_kunit_run_vectors(test, L, depth_recovery_vectors,
+			      ARRAY_SIZE(depth_recovery_vectors));
+}
+
+static void lua_string_depth_candidate_test(struct kunit *test)
+{
+	lua_State *L = lua_kunit_new_behavior_state(test);
+
+	lua_kunit_run_vectors(test, L, depth_candidate_vectors,
+			      ARRAY_SIZE(depth_candidate_vectors));
+}
+
+static void lua_string_depth_restore_test(struct kunit *test)
+{
+	static const struct {
+		const char *src;
+		const char *pattern;
+		bool matched;
+	} paths[] = {
+		{ "", "", true },
+		{ "a", "$", false },
+		{ "", "$", true },
+		{ "$", "$a?", true },
+		{ "a", "b", false },
+		{ "ab", "a?b", true },
+		{ "a", "a?a$", true },
+		{ "a", "a?b", false },
+		{ "a", "()a", true },
+		{ "a", "()b", false },
+		{ "a", "(a)", true },
+		{ "a", "(a)b", false },
+		{ "a", "(b)", false },
+		{ "a", "(a)%1", false },
+		{ "aa", "(a)%1", true },
+		{ "a", "%b()", false },
+		{ "()", "%b()", true },
+		{ "a", "%f[%d]", false },
+		{ "a", "%f[%a]a", true },
+		{ "aaa", "a*a$", true },
+		{ "aaa", "a*a*b", false },
+		{ "", "a+", false },
+		{ "aaa", "a+a$", true },
+		{ "aaa", "a+a+b", false },
+		{ "aaa", "a-a$", true },
+		{ "aaa", "a-a-b", false },
+	};
+	lua_State *L = lua_kunit_new_depth_state(test);
+	size_t i;
+	int status;
+
+	for (i = 0; i < ARRAY_SIZE(paths); i++) {
+		lua_settop(L, 0);
+		lua_pushcfunction(L, lua_kunit_match_depth);
+		lua_pushstring(L, paths[i].src);
+		lua_pushstring(L, paths[i].pattern);
+		status = lua_pcall(L, 2, LUA_MULTRET, 0);
+		KUNIT_ASSERT_EQ_MSG(test, status, 0, "pattern %s", paths[i].pattern);
+		KUNIT_ASSERT_EQ(test, lua_gettop(L), 2);
+		KUNIT_EXPECT_EQ_MSG(test, lua_toboolean(L, 1), paths[i].matched,
+				    "pattern %s", paths[i].pattern);
+		KUNIT_EXPECT_EQ_MSG(test, lua_tointeger(L, 2), 8,
+				    "depth leaked for pattern %s", paths[i].pattern);
+	}
+}
+
+static void lua_string_depth_capture32_test(struct kunit *test)
+{
+	lua_State *L = lua_kunit_new_behavior_state(test);
+	char pattern[97];
+	char source[33];
+	int status;
+	int i;
+
+	memset(source, 'a', 32);
+	source[32] = '\0';
+	for (i = 0; i < 32; i++)
+		memcpy(pattern + i * 3, "(a)", 3);
+	pattern[96] = '\0';
+	lua_kunit_push_string_function(L, "match");
+	lua_pushstring(L, source);
+	lua_pushstring(L, pattern);
+	status = lua_pcall(L, 2, LUA_MULTRET, 0);
+	KUNIT_ASSERT_EQ(test, status, 0);
+	KUNIT_ASSERT_EQ(test, lua_gettop(L), 32);
+	for (i = 1; i <= 32; i++) {
+		KUNIT_ASSERT_EQ(test, lua_type(L, i), LUA_TSTRING);
+		KUNIT_EXPECT_STREQ(test, lua_tostring(L, i), "a");
+	}
+}
+
 static struct kunit_case lua_string_test_cases[] = {
 	KUNIT_CASE(lua_state_lifecycle_test),
 	KUNIT_CASE(lua_string_basic_test),
@@ -742,6 +1646,15 @@ static struct kunit_case lua_string_test_cases[] = {
 	KUNIT_CASE(lua_string_iterator_test),
 	KUNIT_CASE(lua_string_gsub_test),
 	KUNIT_CASE(lua_string_malformed_pattern_test),
+	KUNIT_CASE(lua_string_work_behavior_test),
+	KUNIT_CASE(lua_string_depth_optional_test),
+	KUNIT_CASE(lua_string_depth_capture_test),
+	KUNIT_CASE(lua_string_depth_expand_test),
+	KUNIT_CASE(lua_string_depth_api_test),
+	KUNIT_CASE(lua_string_depth_recovery_test),
+	KUNIT_CASE(lua_string_depth_candidate_test),
+	KUNIT_CASE(lua_string_depth_restore_test),
+	KUNIT_CASE(lua_string_depth_capture32_test),
 	{}
 };
 
