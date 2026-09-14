@@ -20,6 +20,50 @@
 
 #include "lstrwork.h"
 
+/* One public operation (one iterator call for gmatch), including its output.
+** Nested callbacks have independent budgets.  This is not a VM-wide limit.
+*/
+typedef struct StrWork {
+  lua_State *L;
+  StrWorkBudget budget;
+#ifdef LUA_STRING_WORK_TEST
+  void *record;
+#endif
+} StrWork;
+
+#ifdef LUA_STRING_WORK_TEST
+static void strwork_observer_begin (StrWork *work, enum StrWorkAPI api);
+static void strwork_observer_charge (StrWork *work, enum StrWorkKind kind,
+                                    u64 cost, u64 before, bool allowed);
+static void strwork_end (StrWork *work);
+#else
+#define strwork_observer_begin(work, api) ((void)0)
+#define strwork_observer_charge(work, kind, cost, before, allowed) ((void)0)
+#define strwork_end(work) ((void)0)
+#endif
+
+static void strwork_charge (StrWork *work, enum StrWorkKind kind, u64 cost) {
+#ifdef LUA_STRING_WORK_TEST
+  u64 before = work->budget.remaining;
+#endif
+  bool allowed = strwork_debit(&work->budget, cost);
+  strwork_observer_charge(work, kind, cost, before, allowed);
+  if (!allowed)
+    luaL_error(work->L, "string work limit exceeded");
+}
+
+static void strwork_begin (lua_State *L, StrWork *work, enum StrWorkAPI api) {
+  work->L = L;
+  work->budget.remaining = LUA_STRING_WORK_LIMIT;
+  work->budget.exceeded = false;
+  strwork_observer_begin(work, api);
+  /* Observer absence or capacity must never bypass enforcement. */
+  strwork_charge(work, SW_OPERATION, 1);
+}
+
+#define strwork_bind(ms, w) ((ms)->work = (w))
+#define strwork_ms(ms, kind, cost) strwork_charge((ms)->work, kind, cost)
+
 
 /* macro to `unsign' a character */
 #define uchar(c)        ((unsigned char)(c))
@@ -181,7 +225,7 @@ typedef struct MatchState {
   lua_State *L;
   int level;  /* total number of captures (finished or unfinished) */
   int matchdepth;  /* remaining recursive match calls */
-  STRWORK_FIELD
+  StrWork *work;
   struct {
     const char *init;
     ptrdiff_t len;
@@ -707,11 +751,9 @@ static int gfind_nodef (lua_State *L) {
 
 /* Count direct payload requests, not buffer merging or string interning. */
 static void add_work_value (MatchState *ms, luaL_Buffer *b) {
-#ifdef LUA_STRING_WORK_TEST
   size_t len;
   lua_tolstring(ms->L, -1, &len);
   strwork_ms(ms, SW_OUTPUT, len);
-#endif
   luaL_addvalue(b);
 }
 

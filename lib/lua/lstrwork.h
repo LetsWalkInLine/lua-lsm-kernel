@@ -15,12 +15,15 @@ enum StrWorkKind {
 
 enum StrWorkAPI { SW_FIND, SW_MATCH, SW_GMATCH, SW_GSUB };
 
+/* Initial internal limit; representative workload/performance review follows. */
+#define LUA_STRING_WORK_LIMIT 65536ULL
+
 typedef struct StrWorkBudget {
   u64 remaining;
   bool exceeded;
 } StrWorkBudget;
 
-/* Pure arithmetic only: no production operation enforces this budget yet. */
+/* Exact exhaustion succeeds; only an unaffordable request sets exceeded. */
 static inline bool strwork_debit (StrWorkBudget *b, u64 cost) {
   if (b->exceeded) return false;
   if (cost > b->remaining) {
@@ -40,24 +43,5 @@ static inline bool strwork_accumulate (u64 *total, u64 cost) {
   *total += cost;
   return false;
 }
-
-#ifdef LUA_STRING_WORK_TEST
-typedef struct StrWork { void *record; } StrWork;
-static void strwork_begin (lua_State *L, StrWork *work, enum StrWorkAPI api);
-static void strwork_charge (StrWork *work, enum StrWorkKind kind, u64 cost);
-static void strwork_end (StrWork *work);
-#define STRWORK_FIELD StrWork *work;
-#define strwork_bind(ms, w) ((ms)->work = (w))
-#define strwork_ms(ms, kind, cost) strwork_charge((ms)->work, kind, cost)
-#else
-/* No observer storage or counter operations in the ordinary/depth libraries. */
-typedef struct StrWork {} StrWork;
-#define strwork_begin(L, work, api) ((void)(work))
-#define strwork_charge(work, kind, cost) ((void)0)
-#define strwork_end(work) ((void)(work))
-#define STRWORK_FIELD
-#define strwork_bind(ms, w) ((void)0)
-#define strwork_ms(ms, kind, cost) ((void)0)
-#endif
 
 #endif

@@ -75,7 +75,7 @@ static void work_run(struct kunit *test, const char *chunk, int expected_status)
 	status = luaL_loadbuffer(f->L, chunk, strlen(chunk), "work-test");
 	KUNIT_ASSERT_EQ_MSG(test, status, 0, "loading %s: %s", chunk,
 			   status ? lua_tostring(f->L, -1) : "success");
-	memset(&f->observer, 0, sizeof(f->observer));
+	lua_work_reset(&f->observer);
 	status = lua_pcall(f->L, 0, LUA_MULTRET, 0);
 	KUNIT_ASSERT_EQ_MSG(test, status, expected_status, "%s: %s", chunk,
 			   status ? lua_tostring(f->L, -1) : "success");
@@ -119,7 +119,7 @@ static struct lua_work_record *work_find(struct kunit *test,
 	lua_pushlstring(L, pat, plen);
 	lua_pushinteger(L, init);
 	lua_pushboolean(L, plain);
-	memset(&f->observer, 0, sizeof(f->observer));
+	lua_work_reset(&f->observer);
 	status = lua_pcall(L, 4, LUA_MULTRET, 0);
 	KUNIT_ASSERT_EQ(test, status, 0);
 	KUNIT_ASSERT_EQ(test, f->observer.used, 1U);
@@ -583,7 +583,7 @@ static void work_observer_test(struct kunit *test)
 	KUNIT_ASSERT_EQ(test, lua_pcall(L, 0, 1, 0), 0);
 	KUNIT_EXPECT_EQ(test, other->used, 1U);
 	/* A full observer flags lost records without becoming a work limit. */
-	memset(&f->observer, 0, sizeof(f->observer));
+	lua_work_reset(&f->observer);
 	for (i = 0; i < LUA_WORK_RECORDS; i++) {
 		lua_settop(f->L, 0);
 		KUNIT_ASSERT_EQ(test, luaL_loadbuffer(f->L, chunk, strlen(chunk), "observer-fill"), 0);
@@ -601,7 +601,7 @@ static void work_observer_test(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, f->observer.used, (unsigned int)LUA_WORK_RECORDS);
 	KUNIT_EXPECT_MEMEQ(test, &f->observer.records[0], &saved, sizeof(saved));
 	lua_settop(f->L, 0);
-	memset(&f->observer, 0, sizeof(f->observer));
+	lua_work_reset(&f->observer);
 	lua_pushcfunction(f->L, work_saturate_run);
 	lua_pushlightuserdata(f->L, &f->observer);
 	KUNIT_ASSERT_EQ(test, lua_pcall(f->L, 1, 2, 0), 0);
@@ -611,6 +611,421 @@ static void work_observer_test(struct kunit *test)
 	KUNIT_EXPECT_TRUE(test, f->observer.records[0].overflow);
 	KUNIT_EXPECT_EQ(test, f->observer.records[0].total, ~(u64)0);
 	KUNIT_EXPECT_EQ(test, f->observer.records[0].count[SW_OUTPUT], ~(u64)0);
+}
+
+static const char work_reuse_chunk[] =
+	"local a,b=string.match('abc123','(%a+)(%d+)'); assert(a=='abc' and b=='123')";
+
+static void work_limit(struct work_fixture *f, u64 limit)
+{
+	f->observer.limit_override = true;
+	f->observer.limit = limit;
+}
+
+static struct lua_work_record *work_rejected(struct kunit *test, unsigned int i)
+{
+	struct work_fixture *f = test->priv;
+	struct lua_work_record *r;
+	u64 total = 0;
+	int k;
+
+	KUNIT_ASSERT_LT(test, i, f->observer.used);
+	r = &f->observer.records[i];
+	KUNIT_EXPECT_TRUE(test, r->exceeded);
+	KUNIT_EXPECT_FALSE(test, r->finished);
+	KUNIT_EXPECT_FALSE(test, r->overflow);
+	KUNIT_EXPECT_EQ(test, r->remaining, 0ULL);
+	KUNIT_EXPECT_GT(test, r->rejected_cost, r->rejected_remaining);
+	for (k = 0; k < SW_KINDS; k++)
+		total += r->count[k];
+	KUNIT_EXPECT_EQ(test, total, r->total);
+	KUNIT_EXPECT_EQ(test, total + r->rejected_remaining, r->initial);
+	KUNIT_ASSERT_EQ(test, lua_type(f->L, -1), LUA_TSTRING);
+	KUNIT_EXPECT_NOT_NULL(test, strstr(lua_tostring(f->L, -1), "string work limit exceeded"));
+	return r;
+}
+
+/* Sweep every affordable prefix, including requests spanning several units.
+ * Lua assertions independently check successful results; existing M3 cases
+ * retain the exact category/formula oracles for the full operations.
+ */
+static void work_limit_sweep_test(struct kunit *test)
+{
+	static const struct {
+		const char *chunk;
+		enum StrWorkAPI api;
+	} vectors[] = {
+		{ "local a,b=string.find('abcabc','bc',1,true); assert(a==2 and b==3)", SW_FIND },
+		{ "assert(string.find('abc','abcd')==nil)", SW_FIND },
+		{ "local a,b=string.find('ab','(b)'); assert(a==2 and b==2)", SW_FIND },
+		{ "assert(string.find('abc','',1,true)==1)", SW_FIND },
+		{ "assert(string.match('a','a')=='a')", SW_MATCH },
+		{ "assert(string.match('','^$')=='')", SW_MATCH },
+		{ "assert(string.match('aaaa','^a?a?a?a?b')==nil)", SW_MATCH },
+		{ "assert(string.match('aaaa','^a*a*b')==nil)", SW_MATCH },
+		{ "assert(string.match('aaaa','^a-a-b')==nil)", SW_MATCH },
+		{ "assert(string.match('b','[%%a-cx]')=='b')", SW_MATCH },
+		{ "assert(string.match('x','%f[a]')==nil)", SW_MATCH },
+		{ "assert(string.match('(())','%b()')=='(())')", SW_MATCH },
+		{ "assert(string.match('aaaab','^(aa)%1b')=='aa')", SW_MATCH },
+		{ "local a,b=string.match('ab','(a)(b)'); assert(a=='a' and b=='b')", SW_MATCH },
+		{ "assert(string.gmatch('ab','.')()=='a')", SW_GMATCH },
+		{ "assert(string.gfind('ab','.')()=='a')", SW_GMATCH },
+		{ "assert(string.gmatch('','()')()==1)", SW_GMATCH },
+		{ "assert(string.gsub('aa','a','%0%0')=='aaaa')", SW_GSUB },
+		{ "assert(string.gsub('aa','(a)','%1')=='aa')", SW_GSUB },
+		{ "assert(string.gsub('ab','z','x')=='ab')", SW_GSUB },
+		{ "assert(string.gsub('ab','','x')=='xaxbx')", SW_GSUB },
+		{ "assert(string.gsub('abc','a','x',0)=='abc')", SW_GSUB },
+		{ "assert(string.gsub('abc','a','x',-1)=='abc')", SW_GSUB },
+		{ "assert(string.gsub('a','a',function(x) return x end)=='a')", SW_GSUB },
+		{ "assert(string.gsub('a','a',function() return false end)=='a')", SW_GSUB },
+		{ "assert(string.gsub('a','a',function() return 123 end)=='123')", SW_GSUB },
+		{ "assert(string.gsub('a','a',{a='bc'})=='bc')", SW_GSUB },
+		{ "assert(string.gsub('a','a',{})=='a')", SW_GSUB },
+	};
+	struct work_fixture *f = test->priv;
+	struct lua_work_record *r;
+	u64 w, limit;
+	unsigned int v, seen = 0, attempts = 0;
+
+	for (v = 0; v < ARRAY_SIZE(vectors); v++) {
+		work_limit(f, LUA_STRING_WORK_LIMIT);
+		work_run(test, vectors[v].chunk, 0);
+		KUNIT_ASSERT_EQ(test, f->observer.used, 1U);
+		w = work_record(test, 0, vectors[v].api, true)->total;
+		KUNIT_ASSERT_LE(test, w, 512ULL);
+		for (limit = 0; limit <= w + 1; limit++) {
+			work_limit(f, limit);
+			work_run(test, vectors[v].chunk, limit < w ? LUA_ERRRUN : 0);
+			KUNIT_ASSERT_EQ(test, f->observer.used, 1U);
+			KUNIT_EXPECT_EQ(test, lua_gettop(f->L), limit < w ? 1 : 0);
+			if (limit < w) {
+				r = work_rejected(test, 0);
+				seen |= 1U << r->rejected_kind;
+			} else {
+				r = work_record(test, 0, vectors[v].api, true);
+				KUNIT_EXPECT_FALSE(test, r->exceeded);
+				KUNIT_EXPECT_EQ(test, r->total, w);
+				KUNIT_EXPECT_EQ(test, r->remaining, limit - w);
+			}
+			KUNIT_EXPECT_EQ(test, r->initial, limit);
+			attempts++;
+		}
+	}
+	KUNIT_EXPECT_EQ(test, seen, (1U << SW_KINDS) - 1);
+	kunit_info(test, "work-limit sweep: %u vectors, %u calls, rejected kinds=%x\n",
+		   v, attempts, seen);
+}
+
+static void work_limit_precharge_test(struct kunit *test)
+{
+	struct work_fixture *f = test->priv;
+	struct lua_work_record *r;
+	const char *chunk = "return string.find('aaaab','aaaac',1,true)";
+
+	/* Entry + first byte + candidate leaves three units for a four-byte compare. */
+	work_limit(f, 6);
+	work_run(test, chunk, LUA_ERRRUN);
+	r = work_rejected(test, 0);
+	KUNIT_EXPECT_EQ(test, r->rejected_kind, SW_COMPARE);
+	KUNIT_EXPECT_EQ(test, r->rejected_cost, 4ULL);
+	KUNIT_EXPECT_EQ(test, r->rejected_remaining, 3ULL);
+	KUNIT_EXPECT_EQ(test, r->total, 3ULL);
+	KUNIT_EXPECT_EQ(test, r->count[SW_COMPARE], 0ULL);
+	work_limit(f, 7);
+	work_run(test, chunk, 0);
+	KUNIT_EXPECT_TRUE(test, lua_isnil(f->L, -1));
+	KUNIT_EXPECT_EQ(test, work_record(test, 0, SW_FIND, true)->remaining, 0ULL);
+	work_limit(f, 3);
+	work_run(test, "return string.gsub('abc','z','x',0)", LUA_ERRRUN);
+	r = work_rejected(test, 0);
+	KUNIT_EXPECT_EQ(test, r->rejected_kind, SW_OUTPUT);
+	KUNIT_EXPECT_EQ(test, r->rejected_cost, 3ULL);
+	KUNIT_EXPECT_EQ(test, r->rejected_remaining, 2ULL);
+	KUNIT_EXPECT_EQ(test, r->total, 1ULL);
+	KUNIT_EXPECT_EQ(test, r->count[SW_OUTPUT], 0ULL);
+}
+
+static void work_limit_error_order_test(struct kunit *test)
+{
+	static const struct {
+		const char *chunk;
+		const char *error;
+	} errors[] = {
+		{ "return string.match('a','%')", "malformed pattern" },
+		{ "return string.match('',string.rep('a*',65))",
+		  "pattern recursion limit exceeded" },
+		{ "return string.match('',string.rep('()',33))", "too many captures" },
+		{ "return string.match('a','(a')", "unfinished capture" },
+		{ "return string.match('a','%1')", "invalid capture index" },
+		{ "return string.gsub('a','a',function() return {} end)",
+		  "invalid replacement value" },
+		{ "return string.gsub('a','a',function() error('callback boom') end)",
+		  "callback boom" },
+	};
+	struct work_fixture *f = test->priv;
+	struct lua_work_record *r;
+	u64 w;
+	unsigned int i;
+
+	for (i = 0; i < ARRAY_SIZE(errors); i++) {
+		work_limit(f, LUA_STRING_WORK_LIMIT);
+		work_run(test, errors[i].chunk, LUA_ERRRUN);
+		r = &f->observer.records[0];
+		KUNIT_EXPECT_FALSE(test, r->exceeded);
+		w = r->total;
+		work_limit(f, w);
+		work_run(test, errors[i].chunk, LUA_ERRRUN);
+		KUNIT_EXPECT_NOT_NULL(test, strstr(lua_tostring(f->L, -1), errors[i].error));
+		r = &f->observer.records[0];
+		KUNIT_EXPECT_FALSE(test, r->finished);
+		KUNIT_EXPECT_FALSE(test, r->exceeded);
+		KUNIT_EXPECT_EQ(test, r->remaining, 0ULL);
+		work_limit(f, w - 1);
+		work_run(test, errors[i].chunk, LUA_ERRRUN);
+		work_rejected(test, 0);
+	}
+	/* Argument errors still precede even the operation's zero-unit limit. */
+	work_limit(f, 0);
+	work_run(test, "return string.match({},'a')", LUA_ERRRUN);
+	KUNIT_EXPECT_EQ(test, f->observer.used, 0U);
+	KUNIT_EXPECT_NOT_NULL(test, strstr(lua_tostring(f->L, -1), "string expected"));
+	work_limit(f, LUA_STRING_WORK_LIMIT);
+	work_run(test, work_reuse_chunk, 0);
+	KUNIT_EXPECT_EQ(test, work_record(test, 0, SW_MATCH, true)->total, 39ULL);
+}
+
+/* Keep the closure rooted across protected calls and quota changes in C. */
+static void work_limit_iterator_test(struct kunit *test)
+{
+	struct work_fixture *f = test->priv;
+	lua_State *L = f->L;
+	const u64 limits[] = {5, 7, 8};
+	unsigned int i, repeat;
+
+	for (i = 0; i < ARRAY_SIZE(limits); i++) {
+		work_run(test, "return string.gmatch('ab','.')", 0);
+		KUNIT_ASSERT_EQ(test, f->observer.used, 0U);
+		work_limit(f, limits[i]);
+		lua_pushvalue(L, 1);
+		KUNIT_ASSERT_EQ(test, lua_pcall(L, 0, LUA_MULTRET, 0), LUA_ERRRUN);
+		work_rejected(test, 0);
+		KUNIT_EXPECT_EQ(test, lua_gettop(L), 2);
+		lua_settop(L, 1);
+		if (i == 0) {
+			lua_pushvalue(L, 1);
+			KUNIT_ASSERT_EQ(test, lua_pcall(L, 0, 1, 0), LUA_ERRRUN);
+			work_rejected(test, 1);
+			lua_settop(L, 1);
+		}
+		work_limit(f, 9);
+		lua_pushvalue(L, 1);
+		KUNIT_ASSERT_EQ(test, lua_pcall(L, 0, LUA_MULTRET, 0), 0);
+		KUNIT_ASSERT_EQ(test, lua_gettop(L), 2);
+		KUNIT_EXPECT_STREQ(test, lua_tostring(L, -1), i == 0 ? "a" : "b");
+		KUNIT_EXPECT_EQ(test, f->observer.records[f->observer.used - 1].remaining, 0ULL);
+	}
+	work_limit(f, 6);
+	work_run(test, "return string.gfind('','()')", 0);
+	lua_pushvalue(L, 1);
+	KUNIT_ASSERT_EQ(test, lua_pcall(L, 0, 1, 0), LUA_ERRRUN);
+	work_rejected(test, 0);
+	lua_settop(L, 1);
+	for (repeat = 0; repeat < 2; repeat++) {
+		lua_pushvalue(L, 1);
+		KUNIT_ASSERT_EQ(test, lua_pcall(L, 0, LUA_MULTRET, 0), 0);
+		KUNIT_EXPECT_EQ(test, lua_gettop(L), 1);
+		KUNIT_EXPECT_EQ(test, work_record(test, repeat + 1, SW_GMATCH, true)->total, 1ULL);
+	}
+}
+
+static void work_limit_reentry_test(struct kunit *test)
+{
+	struct work_fixture *f = test->priv;
+	struct lua_work_record outer;
+	struct lua_work_record *r;
+	unsigned int i;
+	static const char * const caught[] = {
+		"assert(string.gsub('a','a',function(x) "
+		"assert(not pcall(string.match,'aaaa','^a?a?a?a?b')); return x end)=='a')",
+		"local t=setmetatable({}, {__index=function(t,x) "
+		"assert(not pcall(string.match,'aaaa','^a?a?a?a?b')); return x end}); "
+		"assert(string.gsub('a','a',t)=='a')",
+	};
+	static const char * const propagated[] = {
+		"return string.gsub('a','a',function(x) return string.match('aaaa','^a?a?a?a?b') end)",
+		"local t=setmetatable({}, {__index=function() "
+		"return string.match('aaaa','^a?a?a?a?b') end}); return string.gsub('a','a',t)",
+	};
+
+	work_limit(f, 32);
+	work_run(test, "assert(string.gsub('a','a',function(x) return x end)=='a')", 0);
+	outer = *work_record(test, 0, SW_GSUB, true);
+	for (i = 0; i < ARRAY_SIZE(caught); i++) {
+		work_run(test, caught[i], 0);
+		KUNIT_ASSERT_EQ(test, f->observer.used, 2U);
+		KUNIT_EXPECT_MEMEQ(test, work_record(test, 0, SW_GSUB, true),
+				   &outer, sizeof(outer));
+		r = &f->observer.records[1];
+		KUNIT_EXPECT_TRUE(test, r->exceeded);
+		KUNIT_EXPECT_EQ(test, r->initial, 32ULL);
+		work_run(test, propagated[i], LUA_ERRRUN);
+		KUNIT_ASSERT_EQ(test, f->observer.used, 2U);
+		work_rejected(test, 1);
+		r = &f->observer.records[0];
+		KUNIT_EXPECT_FALSE(test, r->exceeded);
+		KUNIT_EXPECT_FALSE(test, r->finished);
+		KUNIT_EXPECT_GT(test, r->remaining, 0ULL);
+	}
+	work_run(test, "local ok,err=xpcall(function() string.match('aaaa','^a?a?a?a?b') end,"
+		 "function(e) assert(string.match('a','a')=='a'); return 'handled' end);"
+		 "assert(not ok and err=='handled'); assert(string.match('a','a')=='a')", 0);
+	KUNIT_ASSERT_EQ(test, f->observer.used, 3U);
+	KUNIT_EXPECT_TRUE(test, f->observer.records[0].exceeded);
+	KUNIT_EXPECT_MEMEQ(test, work_record(test, 1, SW_MATCH, true),
+			   work_record(test, 2, SW_MATCH, true), sizeof(outer));
+}
+
+static void work_limit_side_effect_test(struct kunit *test)
+{
+	static const char * const chunks[] = {
+		"hits=0; return string.gsub('a','a',function() hits=hits+1; return '12345678' end)",
+		"hits=0; local t=setmetatable({}, {__index=function() "
+		"hits=hits+1; return '12345678' end}); return string.gsub('a','a',t)",
+	};
+	struct work_fixture *f = test->priv;
+	struct lua_work_record *r;
+	unsigned int i, ran;
+
+	for (i = 0; i < ARRAY_SIZE(chunks); i++) {
+		for (ran = 0; ran <= 1; ran++) {
+			work_limit(f, 10 + ran);
+			work_run(test, chunks[i], LUA_ERRRUN);
+			r = work_rejected(test, 0);
+			KUNIT_EXPECT_EQ(test, r->rejected_kind, ran ? SW_OUTPUT : SW_CALLBACK);
+			KUNIT_EXPECT_EQ(test, r->rejected_cost, ran ? 8ULL : 1ULL);
+			KUNIT_EXPECT_EQ(test, r->count[SW_CALLBACK], (u64)ran);
+			lua_getglobal(f->L, "hits");
+			KUNIT_EXPECT_EQ(test, lua_tointeger(f->L, -1), (lua_Integer)ran);
+			lua_pop(f->L, 1);
+		}
+	}
+}
+
+static void work_limit_buffer_test(struct kunit *test)
+{
+	struct work_fixture *f = test->priv;
+	struct lua_work_record *r;
+	u64 w;
+	int i;
+	const char *chunk = "return string.gsub('aa','a',string.rep('x',1536))";
+
+	work_run(test, chunk, 0);
+	w = work_record(test, 0, SW_GSUB, true)->total;
+	KUNIT_EXPECT_EQ(test, lua_objlen(f->L, -2), (size_t)3072);
+	for (i = 0; i < 3; i++) {
+		work_limit(f, w - 10);
+		work_run(test, chunk, LUA_ERRRUN);
+		r = work_rejected(test, 0);
+		KUNIT_EXPECT_GT(test, r->count[SW_OUTPUT], (u64)LUAL_BUFFERSIZE);
+		KUNIT_EXPECT_EQ(test, r->count[SW_REPLACEMENT], 2ULL);
+		KUNIT_EXPECT_EQ(test, lua_gettop(f->L), 1);
+		work_limit(f, 39);
+		work_run(test, work_reuse_chunk, 0);
+		KUNIT_EXPECT_EQ(test, work_record(test, 0, SW_MATCH, true)->remaining, 0ULL);
+		KUNIT_EXPECT_EQ(test, lua_gettop(f->L), 0);
+	}
+	work_limit(f, w);
+	work_run(test, chunk, 0);
+	KUNIT_EXPECT_EQ(test, lua_objlen(f->L, -2), (size_t)3072);
+	KUNIT_EXPECT_EQ(test, lua_tointeger(f->L, -1), (lua_Integer)2);
+	KUNIT_EXPECT_EQ(test, work_record(test, 0, SW_GSUB, true)->remaining, 0ULL);
+}
+
+static void work_limit_observer_test(struct kunit *test)
+{
+	struct work_fixture *f = test->priv;
+	struct lua_work_observer *other;
+	lua_State *L = f->L, *second;
+	const char *small = "return string.match('a','a')";
+	const char *large = "return string.find(string.rep('a',65536),'z',1,true)";
+	int i;
+
+	work_limit(f, 9);
+	lua_work_reset(&f->observer);
+	for (i = 0; i < LUA_WORK_RECORDS; i++) {
+		lua_settop(L, 0);
+		KUNIT_ASSERT_EQ(test, luaL_loadbuffer(L, small, strlen(small), "fill"), 0);
+		KUNIT_ASSERT_EQ(test, lua_pcall(L, 0, 1, 0), 0);
+	}
+	KUNIT_ASSERT_EQ(test, f->observer.used, (unsigned int)LUA_WORK_RECORDS);
+	work_limit(f, 0);
+	lua_settop(L, 0);
+	KUNIT_ASSERT_EQ(test, luaL_loadbuffer(L, small, strlen(small), "full-limit"), 0);
+	KUNIT_ASSERT_EQ(test, lua_pcall(L, 0, 1, 0), LUA_ERRRUN);
+	KUNIT_EXPECT_NOT_NULL(test, strstr(lua_tostring(L, -1), "string work limit exceeded"));
+	KUNIT_EXPECT_TRUE(test, f->observer.full);
+	KUNIT_EXPECT_EQ(test, f->observer.used, (unsigned int)LUA_WORK_RECORDS);
+	/* A different state uses its own default, even while this one has zero. */
+	other = kunit_kzalloc(test, sizeof(*other), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, other);
+	second = lua_newstate(work_alloc, NULL);
+	KUNIT_ASSERT_NOT_NULL(test, second);
+	KUNIT_ASSERT_EQ(test, kunit_add_action_or_reset(test, work_close, second), 0);
+	lua_pushcfunction(second, work_open);
+	lua_pushlightuserdata(second, other);
+	KUNIT_ASSERT_EQ(test, lua_pcall(second, 1, 0, 0), 0);
+	KUNIT_ASSERT_EQ(test, luaL_loadbuffer(second, small, strlen(small), "isolated"), 0);
+	KUNIT_ASSERT_EQ(test, lua_pcall(second, 0, 1, 0), 0);
+	KUNIT_EXPECT_EQ(test, other->records[0].initial, LUA_STRING_WORK_LIMIT);
+	work_run(test, small, LUA_ERRRUN);
+	KUNIT_EXPECT_EQ(test, work_rejected(test, 0)->initial, 0ULL);
+	/* Detaching does not disable the normal finite limit. */
+	lua_work_observe(L, NULL);
+	work_run(test, large, LUA_ERRRUN);
+	KUNIT_EXPECT_EQ(test, f->observer.used, 0U);
+	KUNIT_EXPECT_NOT_NULL(test, strstr(lua_tostring(L, -1), "string work limit exceeded"));
+	work_run(test, small, 0);
+	KUNIT_EXPECT_STREQ(test, lua_tostring(L, -1), "a");
+	lua_work_observe(L, &f->observer);
+	work_run(test, small, LUA_ERRRUN);
+	KUNIT_EXPECT_EQ(test, work_rejected(test, 0)->initial, 0ULL);
+}
+
+static void work_limit_production_test(struct kunit *test)
+{
+	static const char * const rejected[] = {
+		"return string.find(string.rep('a',65536),'z',1,true)",
+		"return string.find('',string.rep('z',65535))",
+		"return string.find(string.rep('a',14),'^'..string.rep('a?',14)..'b')",
+		"return string.match(string.rep('a',14),'^'..string.rep('a?',14)..'b')",
+		"return string.gmatch(string.rep('a',14),string.rep('a?',14)..'b')()",
+		"return string.gsub(string.rep('a',14),'^'..string.rep('a?',14)..'b','x')",
+		"return string.gsub(string.rep('a',65536),'z','x',0)",
+		"return string.gsub('a','a',function() return string.rep('x',65536) end)",
+	};
+	struct work_fixture *f = test->priv;
+	unsigned int i;
+
+	/* Replace only this private state's library with the real policy library. */
+	lua_pushcfunction(f->L, luaopen_string);
+	lua_pushliteral(f->L, LUA_STRLIBNAME);
+	KUNIT_ASSERT_EQ(test, lua_pcall(f->L, 1, 0, 0), 0);
+	work_limit(f, 0);  /* The production library cannot read the private override. */
+	work_run(test, "assert(string.find(string.rep('a',65535),'z',1,true)==nil)", 0);
+	work_run(test, "local s=string.rep('a',65535); local r,n=string.gsub(s,'z','x',0);"
+		 "assert(r==s and n==0)", 0);
+	for (i = 0; i < ARRAY_SIZE(rejected); i++) {
+		work_run(test, rejected[i], LUA_ERRRUN);
+		KUNIT_ASSERT_EQ(test, lua_gettop(f->L), 1);
+		KUNIT_EXPECT_NOT_NULL(test,
+			strstr(lua_tostring(f->L, -1), "string work limit exceeded"));
+		KUNIT_EXPECT_EQ(test, f->observer.used, 0U);
+		work_run(test, work_reuse_chunk, 0);
+		KUNIT_EXPECT_EQ(test, lua_gettop(f->L), 0);
+	}
+	kunit_info(test, "production work limit: exact plain/tail boundaries, eight rejections and reuse passed\n");
 }
 
 static struct kunit_case work_cases[] = {
@@ -625,6 +1040,15 @@ static struct kunit_case work_cases[] = {
 	KUNIT_CASE(work_recovery_test),
 	KUNIT_CASE(work_integer_test),
 	KUNIT_CASE(work_observer_test),
+	KUNIT_CASE(work_limit_sweep_test),
+	KUNIT_CASE(work_limit_precharge_test),
+	KUNIT_CASE(work_limit_error_order_test),
+	KUNIT_CASE(work_limit_iterator_test),
+	KUNIT_CASE(work_limit_reentry_test),
+	KUNIT_CASE(work_limit_side_effect_test),
+	KUNIT_CASE(work_limit_buffer_test),
+	KUNIT_CASE(work_limit_observer_test),
+	KUNIT_CASE(work_limit_production_test),
 	{}
 };
 
