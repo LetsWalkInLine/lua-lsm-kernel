@@ -721,9 +721,11 @@ static int gmatch_aux (lua_State *L) {
       int n;
       lua_Integer newstart = e-s;
       if (e == src) newstart++;  /* empty match? go at least one position */
+      n = push_captures(&ms, src, e);
+      /* A failed result must leave this match available for retry. */
+      luaL_checkstack(L, 1, "updating gmatch cursor");
       lua_pushinteger(L, newstart);
       lua_replace(L, lua_upvalueindex(3));
-      n = push_captures(&ms, src, e);
       strwork_end(&work);
       return n;
     }

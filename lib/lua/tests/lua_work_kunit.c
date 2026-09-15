@@ -813,18 +813,22 @@ static void work_limit_iterator_test(struct kunit *test)
 		work_rejected(test, 0);
 		KUNIT_EXPECT_EQ(test, lua_gettop(L), 2);
 		lua_settop(L, 1);
-		if (i == 0) {
+		for (repeat = 0; repeat < 2; repeat++) {
 			lua_pushvalue(L, 1);
 			KUNIT_ASSERT_EQ(test, lua_pcall(L, 0, 1, 0), LUA_ERRRUN);
-			work_rejected(test, 1);
+			work_rejected(test, repeat + 1);
 			lua_settop(L, 1);
 		}
 		work_limit(f, 9);
 		lua_pushvalue(L, 1);
 		KUNIT_ASSERT_EQ(test, lua_pcall(L, 0, LUA_MULTRET, 0), 0);
 		KUNIT_ASSERT_EQ(test, lua_gettop(L), 2);
-		KUNIT_EXPECT_STREQ(test, lua_tostring(L, -1), i == 0 ? "a" : "b");
+		KUNIT_EXPECT_STREQ(test, lua_tostring(L, -1), "a");
 		KUNIT_EXPECT_EQ(test, f->observer.records[f->observer.used - 1].remaining, 0ULL);
+		lua_settop(L, 1);
+		lua_pushvalue(L, 1);
+		KUNIT_ASSERT_EQ(test, lua_pcall(L, 0, 1, 0), 0);
+		KUNIT_EXPECT_STREQ(test, lua_tostring(L, -1), "b");
 	}
 	work_limit(f, 6);
 	work_run(test, "return string.gfind('','()')", 0);
@@ -834,10 +838,41 @@ static void work_limit_iterator_test(struct kunit *test)
 	lua_settop(L, 1);
 	for (repeat = 0; repeat < 2; repeat++) {
 		lua_pushvalue(L, 1);
+		KUNIT_ASSERT_EQ(test, lua_pcall(L, 0, 1, 0), LUA_ERRRUN);
+		work_rejected(test, repeat + 1);
+		lua_settop(L, 1);
+	}
+	work_limit(f, 7);
+	lua_pushvalue(L, 1);
+	KUNIT_ASSERT_EQ(test, lua_pcall(L, 0, 1, 0), 0);
+	KUNIT_EXPECT_EQ(test, lua_tointeger(L, -1), (lua_Integer)1);
+	KUNIT_EXPECT_EQ(test, work_record(test, 3, SW_GMATCH, true)->remaining, 0ULL);
+	lua_settop(L, 1);
+	for (repeat = 0; repeat < 2; repeat++) {
+		lua_pushvalue(L, 1);
 		KUNIT_ASSERT_EQ(test, lua_pcall(L, 0, LUA_MULTRET, 0), 0);
 		KUNIT_EXPECT_EQ(test, lua_gettop(L), 1);
-		KUNIT_EXPECT_EQ(test, work_record(test, repeat + 1, SW_GMATCH, true)->total, 1ULL);
+		KUNIT_EXPECT_EQ(test, work_record(test, repeat + 4, SW_GMATCH, true)->total, 1ULL);
 	}
+	/* Results can fill the C frame's reserved slots before cursor commit. */
+	work_limit(f, LUA_STRING_WORK_LIMIT);
+	work_run(test, "return string.gmatch(string.rep('a',32),string.rep('(a)',32))", 0);
+	work_limit(f, 323);  /* Last output byte of the 324-unit operation. */
+	lua_pushvalue(L, 1);
+	KUNIT_ASSERT_EQ(test, lua_pcall(L, 0, LUA_MULTRET, 0), LUA_ERRRUN);
+	KUNIT_EXPECT_EQ(test, work_rejected(test, 0)->count[SW_OUTPUT], 31ULL);
+	KUNIT_ASSERT_EQ(test, lua_gettop(L), 2);
+	lua_settop(L, 1);
+	work_limit(f, 324);
+	lua_pushvalue(L, 1);
+	KUNIT_ASSERT_EQ(test, lua_pcall(L, 0, LUA_MULTRET, 0), 0);
+	KUNIT_ASSERT_EQ(test, lua_gettop(L), 33);
+	for (i = 2; i <= 33; i++)
+		KUNIT_EXPECT_STREQ(test, lua_tostring(L, i), "a");
+	lua_settop(L, 1);
+	lua_pushvalue(L, 1);
+	KUNIT_ASSERT_EQ(test, lua_pcall(L, 0, LUA_MULTRET, 0), 0);
+	KUNIT_EXPECT_EQ(test, lua_gettop(L), 1);
 }
 
 static void work_limit_reentry_test(struct kunit *test)
@@ -1016,6 +1051,11 @@ static void work_limit_production_test(struct kunit *test)
 	work_run(test, "assert(string.find(string.rep('a',65535),'z',1,true)==nil)", 0);
 	work_run(test, "local s=string.rep('a',65535); local r,n=string.gsub(s,'z','x',0);"
 		 "assert(r==s and n==0)", 0);
+	/* The default quota can fail during output, after matching has finished.
+	 * Repeating with the same quota must fail again, not skip to an empty match.
+	 */
+	work_run(test, "local it=string.gmatch(string.rep('a',33000),'a*');"
+		 "assert(not pcall(it)); assert(not pcall(it)); assert(not pcall(it))", 0);
 	for (i = 0; i < ARRAY_SIZE(rejected); i++) {
 		work_run(test, rejected[i], LUA_ERRRUN);
 		KUNIT_ASSERT_EQ(test, lua_gettop(f->L), 1);
