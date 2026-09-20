@@ -46,6 +46,12 @@ facts instead of attributing their entire difference to one helper instruction.
 The ordinary production `.text` must be checked against a standalone build of
 the same inherited production source.
 
+The bounded plain scan batches its logical byte charge after `memchr`, whose
+length is limited by the remaining allowance before reading. A/B also remove
+this scan allowance; otherwise A would read an uninitialized budget and B
+could not observe complete demand beyond the production limit. D retains it.
+Successful scan totals and the one-byte rejection at exhaustion are unchanged.
+
 Generated chunks end with a newline, as the corpus verifiers do. This avoids
 the current lexer's EOF edge when an identifier/keyword ends at the final byte;
 this harness does not repair the lexer.

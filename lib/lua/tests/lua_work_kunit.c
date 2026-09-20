@@ -645,6 +645,87 @@ static struct lua_work_record *work_rejected(struct kunit *test, unsigned int i)
 	return r;
 }
 
+static void work_plain_scan_case(struct kunit *test, const char *src,
+		unsigned int n, char target, int pos, unsigned int limit)
+{
+	struct work_fixture *f = test->priv;
+	lua_State *L = f->L;
+	struct lua_work_record *r;
+	unsigned int scan = pos < 0 ? n : pos + 1;
+	unsigned int need = 1 + scan + (pos >= 0);
+	int status;
+
+	work_limit(f, limit);
+	lua_settop(L, 0);
+	lua_getglobal(L, "string");
+	lua_getfield(L, -1, "find");
+	lua_remove(L, -2);
+	lua_pushlstring(L, src, n);
+	lua_pushlstring(L, &target, 1);
+	lua_pushinteger(L, 1);
+	lua_pushboolean(L, true);
+	lua_work_reset(&f->observer);
+	status = lua_pcall(L, 4, LUA_MULTRET, 0);
+	KUNIT_ASSERT_EQ(test, status, limit < need ? LUA_ERRRUN : 0);
+	KUNIT_ASSERT_EQ(test, f->observer.used, 1U);
+	if (status) {
+		r = work_rejected(test, 0);
+		KUNIT_EXPECT_EQ(test, r->rejected_cost, 1ULL);
+		KUNIT_EXPECT_EQ(test, r->rejected_remaining, 0ULL);
+		KUNIT_EXPECT_EQ(test, r->rejected_kind, !limit ? SW_OPERATION :
+				limit <= scan ? SW_PLAIN_SCAN : SW_PLAIN_CANDIDATE);
+	} else {
+		r = work_record(test, 0, SW_FIND, true);
+		KUNIT_EXPECT_EQ(test, r->remaining, (u64)(limit - need));
+		KUNIT_ASSERT_EQ(test, lua_gettop(L), pos < 0 ? 1 : 2);
+		if (pos < 0) {
+			KUNIT_EXPECT_TRUE(test, lua_isnil(L, 1));
+		} else {
+			KUNIT_EXPECT_EQ(test, lua_tointeger(L, 1), (lua_Integer)pos + 1);
+			KUNIT_EXPECT_EQ(test, lua_tointeger(L, 2), (lua_Integer)pos + 1);
+		}
+	}
+	KUNIT_EXPECT_EQ(test, r->total, (u64)min(limit, need));
+	KUNIT_EXPECT_EQ(test, r->count[SW_PLAIN_SCAN],
+		       (u64)min(limit ? limit - 1 : 0, scan));
+	KUNIT_EXPECT_EQ(test, r->count[SW_PLAIN_CANDIDATE],
+		       (u64)(pos >= 0 && limit >= need));
+}
+
+/* Check every allowance around early/late/missing binary matches. */
+static void work_limit_plain_scan_test(struct kunit *test)
+{
+	static const unsigned int lengths[] = { 0, 1, 15, 16, 17, 63, 64, 65 };
+	static const unsigned char targets[] = { 0, 'z', 0xff };
+	struct work_fixture *f = test->priv;
+	unsigned int i, j, k, n, limit, cases = 0;
+	char src[65];
+	int positions[4], pos;
+
+	for (i = 0; i < ARRAY_SIZE(lengths); i++) {
+		n = lengths[i];
+		positions[0] = -1;
+		positions[1] = 0;
+		positions[2] = n / 2;
+		positions[3] = (int)n - 1;
+		for (j = 0; j < ARRAY_SIZE(targets); j++) {
+			for (k = 0; k < (n ? ARRAY_SIZE(positions) : 1); k++) {
+				pos = positions[k];
+				memset(src, 'a', n);
+				if (pos >= 0)
+					src[pos] = targets[j];
+				for (limit = 0; limit <= n + 3; limit++) {
+					work_plain_scan_case(test, src, n, targets[j], pos, limit);
+					cases++;
+				}
+			}
+		}
+	}
+	work_limit(f, LUA_STRING_WORK_LIMIT);
+	work_run(test, work_reuse_chunk, 0);
+	kunit_info(test, "%u plain scan allowance/binary result checks passed\n", cases);
+}
+
 /* Sweep every affordable prefix, including requests spanning several units.
  * Lua assertions independently check successful results; existing M3 cases
  * retain the exact category/formula oracles for the full operations.
@@ -1080,6 +1161,7 @@ static struct kunit_case work_cases[] = {
 	KUNIT_CASE(work_recovery_test),
 	KUNIT_CASE(work_integer_test),
 	KUNIT_CASE(work_observer_test),
+	KUNIT_CASE(work_limit_plain_scan_test),
 	KUNIT_CASE(work_limit_sweep_test),
 	KUNIT_CASE(work_limit_precharge_test),
 	KUNIT_CASE(work_limit_error_order_test),

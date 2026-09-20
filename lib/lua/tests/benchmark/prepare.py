@@ -19,6 +19,12 @@ def cstr(value):
                          else '\\%03o' % b for b in value.encode()) + '"'
 
 
+def unlimited_scan(source):
+    return replace_once(source,
+        '  return work->budget.remaining < len ? work->budget.remaining : len;',
+        '  return len; /* Finite measurement input; no scan allowance. */')
+
+
 def prepare(args):
     dest = args.source.resolve()
     live = Path(__file__).resolve().parents[4]
@@ -42,6 +48,7 @@ def prepare(args):
   (void)L; (void)work; (void)api;
 }
 ''' + a[end:]
+    a = unlimited_scan(a)
     # Keep the current helper/control structure, with debit removed at compile time.
     (target / 'variant_a.c').write_text('#define luaopen_string luaopen_string_bench_a\n' + a)
     for mode in ('b', 'd'):
@@ -49,6 +56,7 @@ def prepare(args):
         if mode == 'b':
             source = replace_once(source, 'bool allowed = strwork_debit(&work->budget, cost);',
                                   'bool allowed = true; /* Count full finite demand; no debit. */')
+            source = unlimited_scan(source)
         source = replace_once(source, 'static const char *match (MatchState *ms, const char *s, const char *p) {',
             '''static void bench_depth(StrWork *work, unsigned int depth, bool admitted);
 static const char *match (MatchState *ms, const char *s, const char *p) {

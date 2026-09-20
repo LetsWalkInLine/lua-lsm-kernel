@@ -567,12 +567,21 @@ static int has_specials (StrWork *work, const char *p) {
 }
 
 
+static size_t strwork_scan_limit (StrWork *work, size_t len) {
+  return work->budget.remaining < len ? work->budget.remaining : len;
+}
+
+
 static const char *find_first (StrWork *work, const char *s, int c, size_t len) {
-  while (len--) {
-    strwork_charge(work, SW_PLAIN_SCAN, 1);
-    if (uchar(*s) == uchar(c)) return s;
-    s++;
-  }
+  size_t allowed = strwork_scan_limit(work, len);
+  const char *found = memchr(s, uchar(c), allowed);
+  /* The bounded scan cannot call Lua or consume another operation's budget.
+  ** Account only the logical prefix, including the first matching byte.
+  */
+  strwork_charge(work, SW_PLAIN_SCAN, found ? (size_t)(found-s) + 1 : allowed);
+  if (found) return found;
+  /* Preserve the one-byte rejection before scanning beyond the allowance. */
+  if (allowed < len) strwork_charge(work, SW_PLAIN_SCAN, 1);
   return NULL;
 }
 
