@@ -33,6 +33,15 @@ EXPORT_SYMBOL(setjmp)
  * void longjmp(struct label_t *label, int val);
  */
 SYM_FUNC_START(longjmp)
+#ifdef CONFIG_KASAN_STACK
+	/* The skipped frames will not run their KASAN stack cleanup. */
+	pushq		%rdi
+	pushq		%rsi
+	movq		8(%rdi), %rdi
+	call		kasan_unpoison_task_stack_below
+	popq		%rsi
+	popq		%rdi
+#endif
 	movq		%rdi, %rax
 	movq		  (%rax), %rbx
 	movq		 8(%rax), %rsp
@@ -47,4 +56,3 @@ SYM_FUNC_START(longjmp)
 	RET
 SYM_FUNC_END(longjmp)
 EXPORT_SYMBOL(longjmp)
-
