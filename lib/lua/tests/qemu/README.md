@@ -1,10 +1,9 @@
 # Finite Lua-LSM QEMU regression
 
 `run.py` packages the existing finite smoke, depth, work, deep-error and
-66th-frame policies and runs them in an x86_64 KVM guest. The guest init files
-and Lua policies are byte-for-byte copies of the M4-03 inputs used again by
-M5-03/M5-04. This runner replaces workspace-specific host paths; it does not
-change their assertions. It has no Kbuild entry.
+66th-frame policies and runs them in an x86_64 KVM guest. The Lua policies are unchanged M4-03 inputs used again by M5-03/M5-04.
+Guest modes share boot/smoke and bounded unload functions in common.sh; their
+policy checks remain unchanged. The runner has no Kbuild entry.
 
 Requirements: Python 3, GNU cpio and timeout, QEMU/KVM, an accessible `/dev/kvm`,
 a **statically linked x86_64 BusyBox** with the normal shell/mount/cat/grep/reboot

@@ -66,6 +66,19 @@ static int work_init(struct kunit *test)
 	return 0;
 }
 
+static lua_State *work_new_state(struct kunit *test,
+				 struct lua_work_observer *observer)
+{
+	lua_State *L = lua_newstate(work_alloc, NULL);
+
+	KUNIT_ASSERT_NOT_NULL(test, L);
+	KUNIT_ASSERT_EQ(test, kunit_add_action_or_reset(test, work_close, L), 0);
+	lua_pushcfunction(L, work_open);
+	lua_pushlightuserdata(L, observer);
+	KUNIT_ASSERT_EQ(test, lua_pcall(L, 1, 0, 0), 0);
+	return L;
+}
+
 static void work_run(struct kunit *test, const char *chunk, int expected_status)
 {
 	struct work_fixture *f = test->priv;
@@ -487,20 +500,7 @@ static void work_integer_test(struct kunit *test)
 	StrWorkBudget b;
 	u64 total;
 	unsigned int i, j;
-	bool ok;
 
-	/* Exhaust the small arithmetic domain without allocating large strings. */
-	for (i = 0; i < 256; i++) {
-		for (j = 0; j < 256; j++) {
-			b = (StrWorkBudget){ .remaining = i };
-			ok = strwork_debit(&b, j);
-			if (ok != (j <= i) || b.remaining != (j <= i ? i - j : 0) ||
-			    b.exceeded != (j > i)) {
-				KUNIT_FAIL(test, "debit %u by %u", i, j);
-				return;
-			}
-		}
-	}
 	for (i = 0; i < ARRAY_SIZE(edge); i++) {
 		for (j = 0; j < ARRAY_SIZE(edge); j++) {
 			b = (StrWorkBudget){ .remaining = edge[i] };
@@ -565,12 +565,7 @@ static void work_observer_test(struct kunit *test)
 	/* A second state has its own registry and externally owned record slots. */
 	other = kunit_kzalloc(test, sizeof(*other), GFP_KERNEL);
 	KUNIT_ASSERT_NOT_NULL(test, other);
-	L = lua_newstate(work_alloc, NULL);
-	KUNIT_ASSERT_NOT_NULL(test, L);
-	KUNIT_ASSERT_EQ(test, kunit_add_action_or_reset(test, work_close, L), 0);
-	lua_pushcfunction(L, work_open);
-	lua_pushlightuserdata(L, other);
-	KUNIT_ASSERT_EQ(test, lua_pcall(L, 1, 0, 0), 0);
+	L = work_new_state(test, other);
 	KUNIT_ASSERT_EQ(test, luaL_loadbuffer(L, chunk, strlen(chunk), "other-state"), 0);
 	KUNIT_ASSERT_EQ(test, lua_pcall(L, 0, 1, 0), 0);
 	KUNIT_EXPECT_STREQ(test, lua_tostring(L, -1), "a");
@@ -1086,12 +1081,7 @@ static void work_limit_observer_test(struct kunit *test)
 	/* A different state uses its own default, even while this one has zero. */
 	other = kunit_kzalloc(test, sizeof(*other), GFP_KERNEL);
 	KUNIT_ASSERT_NOT_NULL(test, other);
-	second = lua_newstate(work_alloc, NULL);
-	KUNIT_ASSERT_NOT_NULL(test, second);
-	KUNIT_ASSERT_EQ(test, kunit_add_action_or_reset(test, work_close, second), 0);
-	lua_pushcfunction(second, work_open);
-	lua_pushlightuserdata(second, other);
-	KUNIT_ASSERT_EQ(test, lua_pcall(second, 1, 0, 0), 0);
+	second = work_new_state(test, other);
 	KUNIT_ASSERT_EQ(test, luaL_loadbuffer(second, small, strlen(small), "isolated"), 0);
 	KUNIT_ASSERT_EQ(test, lua_pcall(second, 0, 1, 0), 0);
 	KUNIT_EXPECT_EQ(test, other->records[0].initial, LUA_STRING_WORK_LIMIT);

@@ -17,6 +17,8 @@ def digest(path):
 
 
 def check_log(log, mode):
+    # Guest markers use /dev/kmsg; old archived guests wrote bare console lines.
+    log = re.sub(r"^\[\s*\d+\.\d+\]\s*", "", log, flags=re.M)
     if re.search(r"BUG:|WARNING:|Oops:|Kernel panic|KASAN:|UBSAN:|FAIL:|"
                  r"(?:^|\]\s*|\s)not ok \d", log, re.M):
         raise ValueError("guest failure or diagnostic in log")
@@ -29,10 +31,16 @@ def check_log(log, mode):
                      "lua-string-work: pass:21 fail:0 skip:0 total:21",
                      "M2_DEPTH: PASS\n", "M4_WORK: PASS\n", "M4_DEEP: PASS\n",
                      "pattern recursion limit exceeded"]
-        for prefix, count in [("M2_DEPTH: PASS ", 9), ("M4_WORK: PASS ", 6),
-                              ("M4_DEEP: PASS ", 10), ("M4_DEEP: ALLOW ", 4)]:
-            if len(re.findall(r"^" + prefix + r"\S+", log, re.M)) != count:
-                raise ValueError("incomplete case markers: " + prefix)
+        cases = {
+            "M2_DEPTH: PASS ": "find match gmatch gsub capture32 find-error match-error gmatch-error gsub-error",
+            "M4_WORK: PASS ": "plain find match gmatch gsub output",
+            "M4_DEEP: PASS ": "find match gmatch gsub plain-compare capture-compare capture-output whole-output value-output tail-output",
+            "M4_DEEP: ALLOW ": "find-uncaught match-uncaught gmatch-uncaught gsub-uncaught",
+        }
+        for prefix, names in cases.items():
+            actual = re.findall(r"^" + prefix + r"(\S+)\s*$", log, re.M)
+            if sorted(actual) != sorted(names.split()):
+                raise ValueError("incomplete or duplicate case markers: " + prefix)
     required += ["string work limit exceeded"]
     for marker in required:
         if marker not in log:
@@ -57,7 +65,7 @@ def make_image(out, mode, busybox):
     guest = Path(__file__).resolve().parent / "guest"
     shutil.copyfile(guest / ("init-" + mode), root / "init")
     (root / "init").chmod(0o755)
-    for policy in guest.glob("*.lua"):
+    for policy in [*guest.glob("*.lua"), guest / "common.sh"]:
         shutil.copyfile(policy, root / policy.name)
     names = ["."] + [str(p.relative_to(root)) for p in sorted(root.rglob("*"))]
     archive = subprocess.run(["cpio", "--null", "-o", "--format=newc", "--owner=0:0"],

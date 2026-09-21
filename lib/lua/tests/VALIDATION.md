@@ -4,27 +4,10 @@ The implementation at `e8b489ea83db766bd2e22fd80354d806828cc376` preserves the
 internal depth/work limits of 65/65,536. It has x86_64 functional and selected
 detection evidence; it is not a production performance or fail-close claim.
 [Policy semantics and limitations](../../../security/lua/docs/STRING-LIMITS.md)
-are separate from the test tools. The public review export is prepared against
-`e12d58b59` (the parent of the first string-test commit), without rewriting the
-development branch or its existing draft PR.
-
-## Review units
-
-The delivery's `patches/series` orders single-topic patches: behavior tests,
-depth guard/tests, work observation/tests, enforcement/tests, iterator cursor
-recovery, bounded plain scan, x86_64 KASAN longjmp cleanup, corpus, isolated
-benchmark support, policy documentation, and QEMU reproduction/evidence docs.
-Depth and observation are separated using the preserved post-M2 source, not a
-new implementation. The final tree is checked against the development source.
-Tests accompany their behavior change; the larger depth/observation test tables
-remain cohesive rather than being divided at arbitrary line counts.
-
-Suggested small PRs follow these units, with stacked bases where necessary.
-The KASAN assembly fix is an independent PR against the existing setjmp base.
-Corpus and benchmark tools need not be in the production-limit PR. Include each
-patch's recorded validation and limitations, not all development history. Draft
-PR text is supplied in the delivery's `REVIEW.md`; publishing or replacing the
-existing draft PR is a separate action.
+are separate from the test tools. KUnit covers behavior, recursion, independent
+work-count formulas, quota boundaries and recovery. QEMU adds real LSM calls.
+The corpus and historical five-variant benchmark are distributed separately as
+`lua-string-experiments-v1.tar.gz`; they are not maintained kernel tests.
 
 ## Evidence attachment
 
@@ -42,7 +25,7 @@ prebuilt boot-image distribution.
 | --- | --- |
 | Full open-API risk audit and original finite vectors | `.dev/LUA-API-AUDIT.md`, `.dev/STRING-PATTERN-TEST-VECTORS.md` |
 | M4 two-configuration boundary/stack evidence | `.dev/sessions/2026-09-13-03-string-work-stack-validation.md`, `.build/m4-03/verification.txt` |
-| Initial corpus protocol | `.build/m5-01/`, tracked [corpus README](corpus/README.md) |
+| Initial corpus protocol | `.build/m5-01/`, experiment package `overlay/lib/lua/tests/corpus/README.md` |
 | Full 1,262,250 timing samples and demand | `.build/m5-02/REPORT.md`, `stats.csv`, `timing-raw.jsonl.gz`, `work-raw.jsonl` in that directory |
 | Plain optimization and both 220,500-sample comparisons | `.build/m5-03/REPORT.md`, `stats.csv`, `position-pair/stats.csv`, and each directory's `timing-raw.jsonl.gz` |
 | Original KASAN failure, then bounds-strict failure | `.build/m5-04/detect-regression.log`, `.build/m5-04/fixed-detect-regression.log` |
@@ -76,7 +59,7 @@ nested-call guarantees. Other architectures and softirq are not covered here.
 ## Build and functional reproduction
 
 Use an independent checkout with the complete review series applied, or the
-recorded development HEAD plus the documentation/runner additions. Requirements
+current development branch containing these tests. Requirements
 used historically: GCC 15.2.0, GNU make/binutils, QEMU 10.2.1 with KVM on
 AMD Ryzen 7 5800H / WSL2. Install normal kernel build dependencies and a static
 BusyBox. The configs enable Lua-LSM/debug/stats, built-in Lua/KUnit, initramfs,
@@ -106,11 +89,13 @@ errors intentionally verify the existing allow behavior, not fail-close.
 
 ## Corpus, performance and advanced experiments
 
-Generate the finite corpus with [corpus/generate.py](corpus/generate.py) and
-follow the [measurement protocol](corpus/README.md) and
-[isolated benchmark instructions](benchmark/README.md). Benchmarks are not
-linked by ordinary Kbuild. A/B/H can disable enforcement and must only run in a
-watched guest. The exact historical M2 input is included at
+Unpack `lua-string-experiments-v1.tar.gz` and verify its `SHA256SUMS`.
+Its README describes the frozen source patch, corpus v1 and isolated benchmark
+preparation. The package also includes the original `lua-lsm-m5-evidence.tar.gz`
+with configurations, host scripts, raw data and failed runs. Package names are
+attachment identifiers; no public download location is claimed here.
+A/B/H can disable enforcement and must only run in a watched guest.
+The exact historical M2 input is included at
 `evidence/.build/m5-02/historical-lstrlib.c`; do not substitute a guessed revision.
 
 For reproducing a historical experiment, use its `before.json` baseline and
