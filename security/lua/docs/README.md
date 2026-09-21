@@ -76,5 +76,6 @@ return M
 ## Docs
 
 - `USAGE.md` - build/enable and runtime management
+- [STRING-LIMITS.md](STRING-LIMITS.md) - string budgets, errors and known limits
 - `API.md` - module format, hook returns, and core APIs
 - `OBSERVABILITY.md` - stats, debug logs, and troubleshooting data
