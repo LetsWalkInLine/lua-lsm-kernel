@@ -647,3 +647,15 @@ config LUA
 	depends on HAS_LUA
 	select ARCH_SETJMP
 	default n
+
+config LUA_KUNIT_TEST
+	bool "KUnit tests for the Lua string library" if !KUNIT_ALL_TESTS
+	depends on KUNIT=y && LUA=y
+	default KUNIT_ALL_TESTS
+	help
+	  This builds unit tests for the in-kernel Lua string library.
+
+	  The tests are built into the kernel so they can use the Lua API
+	  without requiring those symbols to be exported to modules.
+
+	  If unsure, say N.
