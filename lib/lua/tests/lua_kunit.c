@@ -10,6 +10,7 @@
 #include <linux/slab.h>
 #include <linux/string.h>
 
+#include "lua_depth_test.h"
 
 /* The check chunk receives the exact result tuple, including trailing nils. */
 struct lua_kunit_vector {
@@ -399,6 +400,426 @@ static void lua_string_malformed_pattern_test(struct kunit *test)
 			      ARRAY_SIZE(malformed_vectors));
 }
 
+static int lua_kunit_invoke_depth_retry(lua_State *L)
+{
+	int status;
+	int i;
+
+	lua_kunit_push_string_function(L, "gmatch");
+	lua_pushliteral(L, "aaaaaaaab");
+	lua_pushliteral(L, "a?a?a?a?a?a?a?a?b");
+	status = lua_pcall(L, 2, 1, 0);
+	if (status)
+		return status;
+	for (i = 0; i < 2; i++) {
+		lua_pushvalue(L, 1);
+		status = lua_pcall(L, 0, 1, 0);
+		if (status != LUA_ERRRUN)
+			return status ? status : LUA_ERRRUN;
+	}
+	lua_remove(L, 1);
+	lua_kunit_push_string_function(L, "match");
+	lua_pushliteral(L, "ab");
+	lua_pushliteral(L, "a?b");
+	return lua_pcall(L, 2, 1, 0);
+}
+
+static int lua_kunit_invoke_depth_iteration(lua_State *L)
+{
+	bool all_match = true;
+	int status;
+	int i;
+
+	lua_kunit_push_string_function(L, "gmatch");
+	lua_pushliteral(L, "abababababababababababab");
+	lua_pushliteral(L, "a?b");
+	status = lua_pcall(L, 2, 1, 0);
+	if (status)
+		return status;
+	for (i = 0; i < 13; i++) {
+		lua_settop(L, 1);
+		lua_pushvalue(L, 1);
+		status = lua_pcall(L, 0, LUA_MULTRET, 0);
+		if (status)
+			return status;
+		if (i == 12) {
+			all_match &= lua_gettop(L) == 1;
+		} else if (lua_gettop(L) != 2 || lua_type(L, 2) != LUA_TSTRING ||
+			   strcmp(lua_tostring(L, 2), "ab")) {
+			all_match = false;
+		}
+	}
+	lua_settop(L, 0);
+	lua_pushboolean(L, all_match);
+	return 0;
+}
+
+static const struct lua_kunit_vector depth_optional_vectors[] = {
+	{ "DO6", "return string.match(string.rep('a', 6) .. 'b', '^' ..\nstring.rep('a?', "
+	  "6) .. 'b')\n",
+	  "assert(n == 1 and a == \"aaaaaab\")\n" },
+	{ "DO7", "return string.match(string.rep('a', 7) .. 'b', '^' ..\nstring.rep('a?', "
+	  "7) .. 'b')\n",
+	  "assert(n == 1 and a == \"aaaaaaab\")\n" },
+	{ "DO8", "local ok, err = pcall(string.match, 'aaaaaaaab', '^' ..\n"
+	  "string.rep('a?', 8) .. 'b'); return ok, err,\nstring.match('abc123', "
+	  "'(%a+)(%d+)')\n",
+	  "assert(n == 4 and a == false and type(b) == \"string\" and string.find(b,"
+	  " \"pattern recursion limit exceeded\", 1, true) and c == \"abc\" and d == "
+	  "\"123\")\n" },
+	{ "DO-fail", "return string.match('aaaaaaa', '^' .. string.rep('a?', 7) ..\n'b')\n",
+	  "assert(n == 1 and a == nil)\n" },
+	{ "DO-fallback", "return string.match('a', '^a?a$')\n",
+	  "assert(n == 1 and a == \"a\")\n" },
+};
+
+static const struct lua_kunit_vector depth_capture_vectors[] = {
+	{ "DC-position7", "return select('#', string.match('', string.rep('()', 7))),\n"
+	  "string.match('', '()')\n",
+	  "assert(n == 2 and a == 7 and b == 1)\n" },
+	{ "DC-position8", "local ok, err = pcall(string.match, '', string.rep('()', 8));\nreturn "
+	  "ok, err, string.match('abc123', '(%a+)(%d+)')\n",
+	  "assert(n == 4 and a == false and type(b) == \"string\" and string.find(b,"
+	  " \"pattern recursion limit exceeded\", 1, true) and c == \"abc\" and d == "
+	  "\"123\")\n" },
+	{ "DC-normal3", "return string.match('aaa', '(a)(a)(a)')\n",
+	  "assert(n == 3 and a == \"a\" and b == \"a\" and c == \"a\")\n" },
+	{ "DC-normal4", "local ok, err = pcall(string.match, 'aaaa', '(a)(a)(a)(a)');\nreturn ok,"
+	  " err, string.match('abc123', '(%a+)(%d+)')\n",
+	  "assert(n == 4 and a == false and type(b) == \"string\" and string.find(b,"
+	  " \"pattern recursion limit exceeded\", 1, true) and c == \"abc\" and d == "
+	  "\"123\")\n" },
+	{ "DC-nested3", "return string.match('a', '(((a)))')\n",
+	  "assert(n == 3 and a == \"a\" and b == \"a\" and c == \"a\")\n" },
+	{ "DC-nested4", "local ok, err = pcall(string.match, 'a', '((((a))))'); return\nok, err, "
+	  "string.match('abc123', '(%a+)(%d+)')\n",
+	  "assert(n == 4 and a == false and type(b) == \"string\" and string.find(b,"
+	  " \"pattern recursion limit exceeded\", 1, true) and c == \"abc\" and d == "
+	  "\"123\")\n" },
+};
+
+static const struct lua_kunit_vector depth_expand_vectors[] = {
+	{ "DX-greedy7", "return string.match('', '^' .. string.rep('a*', 7) .. '$')\n",
+	  "assert(n == 1 and a == \"\")\n" },
+	{ "DX-greedy8", "local ok, err = pcall(string.match, '', '^' .. string.rep('a*',\n8) .. "
+	  "'$'); return ok, err, string.match('abc123', '(%a+)(%d+)')\n",
+	  "assert(n == 4 and a == false and type(b) == \"string\" and string.find(b,"
+	  " \"pattern recursion limit exceeded\", 1, true) and c == \"abc\" and d == "
+	  "\"123\")\n" },
+	{ "DX-greedy-fail", "return string.match('aaaa', '^a*a*b$')\n",
+	  "assert(n == 1 and a == nil)\n" },
+	{ "DX-greedy-backtrack", "return string.match('aaaa', '^a*a$')\n",
+	  "assert(n == 1 and a == \"aaaa\")\n" },
+	{ "DX-minimal7", "return string.match('', '^' .. string.rep('a-', 7) .. '$')\n",
+	  "assert(n == 1 and a == \"\")\n" },
+	{ "DX-minimal8", "local ok, err = pcall(string.match, '', '^' .. string.rep('a-',\n8) .. "
+	  "'$'); return ok, err, string.match('abc123', '(%a+)(%d+)')\n",
+	  "assert(n == 4 and a == false and type(b) == \"string\" and string.find(b,"
+	  " \"pattern recursion limit exceeded\", 1, true) and c == \"abc\" and d == "
+	  "\"123\")\n" },
+	{ "DX-minimal-fail", "return string.match('aaaa', '^a-a-b$')\n",
+	  "assert(n == 1 and a == nil)\n" },
+	{ "DX-minimal-backtrack", "return string.match('aaaa', '^a-a$')\n",
+	  "assert(n == 1 and a == \"aaaa\")\n" },
+	{ "DX-plus7", "return string.match('aaaaaaa', '^' .. string.rep('a+', 7) ..\n'$')\n",
+	  "assert(n == 1 and a == \"aaaaaaa\")\n" },
+	{ "DX-plus8", "local ok, err = pcall(string.match, 'aaaaaaaa', '^' ..\nstring.rep('a+',"
+	  " 8) .. '$'); return ok, err,\nstring.match('abc123', '(%a+)(%d+)')\n",
+	  "assert(n == 4 and a == false and type(b) == \"string\" and string.find(b,"
+	  " \"pattern recursion limit exceeded\", 1, true) and c == \"abc\" and d == "
+	  "\"123\")\n" },
+	{ "DX-plus-fail", "return string.match('aaaa', '^a+a+b$')\n",
+	  "assert(n == 1 and a == nil)\n" },
+	{ "DX-plus-backtrack", "return string.match('aaaa', '^a+a$')\n",
+	  "assert(n == 1 and a == \"aaaa\")\n" },
+	{ "DX-plus-empty", "return string.match('', 'a+')\n",
+	  "assert(n == 1 and a == nil)\n" },
+};
+
+static const struct lua_kunit_vector depth_api_vectors[] = {
+	{ "DA-find", "local ok, err = pcall(string.find, 'aaaaaaaab', '^' ..\nstring.rep('a?',"
+	  " 8) .. 'b'); return ok, err,\nstring.match('abc123', '(%a+)(%d+)')\n",
+	  "assert(n == 4 and a == false and type(b) == \"string\" and string.find(b,"
+	  " \"pattern recursion limit exceeded\", 1, true) and c == \"abc\" and d == "
+	  "\"123\")\n" },
+	{ "DA-find-ok", "return string.find('aaaaaaab', '^' .. string.rep('a?', 7) ..\n'b')\n",
+	  "assert(n == 2 and a == 1 and b == 8)\n" },
+	{ "DA-plain", "return string.find('a?a?a?a?a?a?a?a?', string.rep('a?', 8), 1,\ntrue)\n",
+	  "assert(n == 2 and a == 1 and b == 16)\n" },
+	{ "DA-gmatch", "local ok, err = pcall(string.gmatch('aaaaaaaab',\nstring.rep('a?', 8) .."
+	  " 'b')); return ok, err,\nstring.match('abc123', '(%a+)(%d+)')\n",
+	  "assert(n == 4 and a == false and type(b) == \"string\" and string.find(b,"
+	  " \"pattern recursion limit exceeded\", 1, true) and c == \"abc\" and d == "
+	  "\"123\")\n" },
+	{ "DA-gmatch-ok", "return string.gmatch('aaaaaaab', string.rep('a?', 7) .. 'b')()\n",
+	  "assert(n == 1 and a == \"aaaaaaab\")\n" },
+	{ "DA-gfind", "local ok, err = pcall(string.gfind('aaaaaaaab', string.rep('a?',\n8) .. "
+	  "'b')); return ok, err, string.match('abc123',\n'(%a+)(%d+)')\n",
+	  "assert(n == 4 and a == false and type(b) == \"string\" and string.find(b,"
+	  " \"pattern recursion limit exceeded\", 1, true) and c == \"abc\" and d == "
+	  "\"123\")\n" },
+	{ "DA-gfind-ok", "return string.gfind('aaaaaaab', string.rep('a?', 7) .. 'b')()\n",
+	  "assert(n == 1 and a == \"aaaaaaab\")\n" },
+	{ "DA-gsub", "local ok, err = pcall(string.gsub, 'aaaaaaaab', '^' ..\nstring.rep('a?',"
+	  " 8) .. 'b', 'X'); return ok, err,\nstring.match('abc123', '(%a+)(%d+)')\n",
+	  "assert(n == 4 and a == false and type(b) == \"string\" and string.find(b,"
+	  " \"pattern recursion limit exceeded\", 1, true) and c == \"abc\" and d == "
+	  "\"123\")\n" },
+	{ "DA-gsub-ok", "return string.gsub('aaaaaaab', '^' .. string.rep('a?', 7) ..\n'b', 'X')\n",
+	  "assert(n == 2 and a == \"X\" and b == 1)\n" },
+	{ "DA-iterator-later",
+	  "local it = string.gmatch('baaaaaaaab', string.rep('a?', 8) ..\n'b'); "
+	  "local first = it(); local ok, err = pcall(it); return\nfirst, ok, err, "
+	  "string.match('ab', 'a?b')\n",
+	  "assert(n == 4 and a == \"b\" and b == false and type(c) == \"string\" and "
+	  "string.find(c, \"pattern recursion limit exceeded\", 1, true) and d == "
+	  "\"ab\")\n" },
+	{ "DA-iterator-retry", NULL,
+	  "assert(n == 3 and type(a) == \"string\" and string.find(a, \"pattern "
+	  "recursion limit exceeded\", 1, true) and type(b) == \"string\" and "
+	  "string.find(b, \"pattern recursion limit exceeded\", 1, true) and c == "
+	  "\"ab\")\n", lua_kunit_invoke_depth_retry },
+};
+
+static const struct lua_kunit_vector depth_recovery_vectors[] = {
+	{ "DR-search", "return string.match(string.rep('a', 16) .. 'b', 'a?b')\n",
+	  "assert(n == 1 and a == \"ab\")\n" },
+	{ "DR-iteration", NULL,
+	  "assert(n == 1 and a == true)\n", lua_kunit_invoke_depth_iteration },
+	{ "DR-replacements", "return string.gsub(string.rep('ab', 12), 'a?b', 'X')\n",
+	  "assert(n == 2 and a == \"XXXXXXXXXXXX\" and b == 12)\n" },
+	{ "DR-class", "local ok, err = pcall(string.match, 'aaa', 'a?a?a?['); return\nok, err, "
+	  "string.match('abc123', '(%a+)(%d+)')\n",
+	  "assert(n == 4 and a == false and type(b) == \"string\" and string.find(b,"
+	  " \"malformed pattern (missing ']')\", 1, true) and c == \"abc\" and d == "
+	  "\"123\")\n" },
+	{ "DR-unfinished",
+	  "local ok, err = pcall(string.match, 'aaa', 'a?a?a?('); return\nok, err, "
+	  "string.match('abc123', '(%a+)(%d+)')\n",
+	  "assert(n == 4 and a == false and type(b) == \"string\" and string.find(b,"
+	  " \"unfinished capture\", 1, true) and c == \"abc\" and d == \"123\")\n" },
+	{ "DR-invalid", "local ok, err = pcall(string.match, 'aaa', 'a?a?a?%1'); return\nok, err,"
+	  " string.match('abc123', '(%a+)(%d+)')\n",
+	  "assert(n == 4 and a == false and type(b) == \"string\" and string.find(b,"
+	  " \"invalid capture index\", 1, true) and c == \"abc\" and d == \"123\")\n" },
+	{ "DR-close", "local ok, err = pcall(string.match, 'aaa', 'a?a?a?)'); return\nok, err, "
+	  "string.match('abc123', '(%a+)(%d+)')\n",
+	  "assert(n == 4 and a == false and type(b) == \"string\" and string.find(b,"
+	  " \"invalid pattern capture\", 1, true) and c == \"abc\" and d == \"123\")\n" },
+	{ "DR-balance", "local ok, err = pcall(string.match, 'aaa', 'a?a?a?%b'); return\nok, err,"
+	  " string.match('abc123', '(%a+)(%d+)')\n",
+	  "assert(n == 4 and a == false and type(b) == \"string\" and string.find(b,"
+	  " \"unbalanced pattern\", 1, true) and c == \"abc\" and d == \"123\")\n" },
+	{ "DR-frontier", "local ok, err = pcall(string.match, 'aaa', 'a?a?a?%f'); return\nok, err,"
+	  " string.match('abc123', '(%a+)(%d+)')\n",
+	  "assert(n == 4 and a == false and type(b) == \"string\" and string.find(b,"
+	  " \"missing\", 1, true) and c == \"abc\" and d == \"123\")\n" },
+	{ "DR-callback", "return string.gsub('xxx', 'x', function() local ok, err =\n"
+	  "pcall(string.match, 'aaaaaaaa', string.rep('a?', 8)); assert(not\nok and"
+	  " string.find(err, 'pattern recursion limit exceeded', 1,\ntrue)); return"
+	  " string.match('ab', 'a?b') end)\n",
+	  "assert(n == 2 and a == \"ababab\" and b == 3)\n" },
+	{ "DR-table", "return string.gsub('xxx', 'x', setmetatable({}, {__index =\nfunction() "
+	  "local ok, err = pcall(string.match, 'aaaaaaaa',\nstring.rep('a?', 8)); "
+	  "assert(not ok and string.find(err,\n'pattern recursion limit exceeded', "
+	  "1, true)); return\nstring.match('ab', 'a?b') end}))\n",
+	  "assert(n == 2 and a == \"ababab\" and b == 3)\n" },
+};
+
+static const struct lua_kunit_vector depth_candidate_vectors[] = {
+	{ "DP-position33", "local ok, err = pcall(string.match, '', string.rep('()', 33));\nreturn "
+	  "ok, err, string.match('abc123', '(%a+)(%d+)')\n",
+	  "assert(n == 4 and a == false and type(b) == \"string\" and string.find(b,"
+	  " \"too many captures\", 1, true) and c == \"abc\" and d == \"123\")\n" },
+	{ "DP-normal33", "local ok, err = pcall(string.match, string.rep('a', 33),\n"
+	  "string.rep('(a)', 33)); return ok, err, string.match('abc123',\n"
+	  "'(%a+)(%d+)')\n",
+	  "assert(n == 4 and a == false and type(b) == \"string\" and string.find(b,"
+	  " \"too many captures\", 1, true) and c == \"abc\" and d == \"123\")\n" },
+	{ "DP-optional64",
+	  "return string.match(string.rep('a', 64) .. 'b', '^' ..\nstring.rep('a?',"
+	  " 64) .. 'b')\n",
+	  "assert(n == 1 and a == "
+	  "\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaab\")\n" },
+	{ "DP-optional65",
+	  "local ok, err = pcall(string.match, string.rep('a', 65) .. 'b',\n'^' .. "
+	  "string.rep('a?', 65) .. 'b'); return ok, err,\nstring.match('abc123', "
+	  "'(%a+)(%d+)')\n",
+	  "assert(n == 4 and a == false and type(b) == \"string\" and string.find(b,"
+	  " \"pattern recursion limit exceeded\", 1, true) and c == \"abc\" and d == "
+	  "\"123\")\n" },
+	{ "DP-greedy64", "return string.match('', '^' .. string.rep('a*', 64) .. '$')\n",
+	  "assert(n == 1 and a == \"\")\n" },
+	{ "DP-greedy65", "local ok, err = pcall(string.match, '', '^' .. string.rep('a*',\n65) .. "
+	  "'$'); return ok, err, string.match('abc123',\n'(%a+)(%d+)')\n",
+	  "assert(n == 4 and a == false and type(b) == \"string\" and string.find(b,"
+	  " \"pattern recursion limit exceeded\", 1, true) and c == \"abc\" and d == "
+	  "\"123\")\n" },
+	{ "DP-minimal64", "return string.match('', '^' .. string.rep('a-', 64) .. '$')\n",
+	  "assert(n == 1 and a == \"\")\n" },
+	{ "DP-minimal65", "local ok, err = pcall(string.match, '', '^' .. string.rep('a-',\n65) .. "
+	  "'$'); return ok, err, string.match('abc123',\n'(%a+)(%d+)')\n",
+	  "assert(n == 4 and a == false and type(b) == \"string\" and string.find(b,"
+	  " \"pattern recursion limit exceeded\", 1, true) and c == \"abc\" and d == "
+	  "\"123\")\n" },
+	{ "DP-gsub64", "return string.gsub('', string.rep('a*', 64), 'X')\n",
+	  "assert(n == 2 and a == \"X\" and b == 1)\n" },
+	{ "DP-gsub65", "local ok, err = pcall(string.gsub, '', string.rep('a*', 65), 'X');\n"
+	  "return ok, err, string.match('abc123', '(%a+)(%d+)')\n",
+	  "assert(n == 4 and a == false and type(b) == \"string\" and string.find(b,"
+	  " \"pattern recursion limit exceeded\", 1, true) and c == \"abc\" and d == "
+	  "\"123\")\n" },
+	{ "DP-gmatch64", "return string.gmatch('', string.rep('a*', 64))()\n",
+	  "assert(n == 1 and a == \"\")\n" },
+	{ "DP-gmatch65", "local ok, err = pcall(string.gmatch('', string.rep('a*', 65)));\nreturn "
+	  "ok, err, string.match('abc123', '(%a+)(%d+)')\n",
+	  "assert(n == 4 and a == false and type(b) == \"string\" and string.find(b,"
+	  " \"pattern recursion limit exceeded\", 1, true) and c == \"abc\" and d == "
+	  "\"123\")\n" },
+	{ "DP-find64", "return string.find('', string.rep('a*', 64))\n",
+	  "assert(n == 2 and a == 1 and b == 0)\n" },
+	{ "DP-find65", "local ok, err = pcall(string.find, '', string.rep('a*', 65));\nreturn "
+	  "ok, err, string.match('abc123', '(%a+)(%d+)')\n",
+	  "assert(n == 4 and a == false and type(b) == \"string\" and string.find(b,"
+	  " \"pattern recursion limit exceeded\", 1, true) and c == \"abc\" and d == "
+	  "\"123\")\n" },
+};
+
+static lua_State *lua_kunit_new_depth_state(struct kunit *test)
+{
+	lua_State *L = lua_kunit_new_state(test);
+
+	lua_kunit_open_library(test, L, luaopen_base, "");
+	lua_kunit_open_library(test, L, luaopen_string_small_depth, LUA_STRLIBNAME);
+	return L;
+}
+
+static void lua_string_depth_optional_test(struct kunit *test)
+{
+	lua_State *L = lua_kunit_new_depth_state(test);
+
+	lua_kunit_run_vectors(test, L, depth_optional_vectors,
+			      ARRAY_SIZE(depth_optional_vectors));
+}
+
+static void lua_string_depth_capture_test(struct kunit *test)
+{
+	lua_State *L = lua_kunit_new_depth_state(test);
+
+	lua_kunit_run_vectors(test, L, depth_capture_vectors,
+			      ARRAY_SIZE(depth_capture_vectors));
+}
+
+static void lua_string_depth_expand_test(struct kunit *test)
+{
+	lua_State *L = lua_kunit_new_depth_state(test);
+
+	lua_kunit_run_vectors(test, L, depth_expand_vectors,
+			      ARRAY_SIZE(depth_expand_vectors));
+}
+
+static void lua_string_depth_api_test(struct kunit *test)
+{
+	lua_State *L = lua_kunit_new_depth_state(test);
+
+	lua_kunit_run_vectors(test, L, depth_api_vectors,
+			      ARRAY_SIZE(depth_api_vectors));
+}
+
+static void lua_string_depth_recovery_test(struct kunit *test)
+{
+	lua_State *L = lua_kunit_new_depth_state(test);
+
+	lua_kunit_run_vectors(test, L, depth_recovery_vectors,
+			      ARRAY_SIZE(depth_recovery_vectors));
+}
+
+static void lua_string_depth_candidate_test(struct kunit *test)
+{
+	lua_State *L = lua_kunit_new_behavior_state(test);
+
+	lua_kunit_run_vectors(test, L, depth_candidate_vectors,
+			      ARRAY_SIZE(depth_candidate_vectors));
+}
+
+static void lua_string_depth_restore_test(struct kunit *test)
+{
+	static const struct {
+		const char *src;
+		const char *pattern;
+		bool matched;
+	} paths[] = {
+		{ "", "", true },
+		{ "a", "$", false },
+		{ "", "$", true },
+		{ "$", "$a?", true },
+		{ "a", "b", false },
+		{ "ab", "a?b", true },
+		{ "a", "a?a$", true },
+		{ "a", "a?b", false },
+		{ "a", "()a", true },
+		{ "a", "()b", false },
+		{ "a", "(a)", true },
+		{ "a", "(a)b", false },
+		{ "a", "(b)", false },
+		{ "a", "(a)%1", false },
+		{ "aa", "(a)%1", true },
+		{ "a", "%b()", false },
+		{ "()", "%b()", true },
+		{ "a", "%f[%d]", false },
+		{ "a", "%f[%a]a", true },
+		{ "aaa", "a*a$", true },
+		{ "aaa", "a*a*b", false },
+		{ "", "a+", false },
+		{ "aaa", "a+a$", true },
+		{ "aaa", "a+a+b", false },
+		{ "aaa", "a-a$", true },
+		{ "aaa", "a-a-b", false },
+	};
+	lua_State *L = lua_kunit_new_depth_state(test);
+	size_t i;
+	int status;
+
+	for (i = 0; i < ARRAY_SIZE(paths); i++) {
+		lua_settop(L, 0);
+		lua_pushcfunction(L, lua_kunit_match_depth);
+		lua_pushstring(L, paths[i].src);
+		lua_pushstring(L, paths[i].pattern);
+		status = lua_pcall(L, 2, LUA_MULTRET, 0);
+		KUNIT_ASSERT_EQ_MSG(test, status, 0, "pattern %s", paths[i].pattern);
+		KUNIT_ASSERT_EQ(test, lua_gettop(L), 2);
+		KUNIT_EXPECT_EQ_MSG(test, lua_toboolean(L, 1), paths[i].matched,
+				    "pattern %s", paths[i].pattern);
+		KUNIT_EXPECT_EQ_MSG(test, lua_tointeger(L, 2), 8,
+				    "depth leaked for pattern %s", paths[i].pattern);
+	}
+}
+
+static void lua_string_depth_capture32_test(struct kunit *test)
+{
+	lua_State *L = lua_kunit_new_behavior_state(test);
+	char pattern[97];
+	char source[33];
+	int status;
+	int i;
+
+	memset(source, 'a', 32);
+	source[32] = '\0';
+	for (i = 0; i < 32; i++)
+		memcpy(pattern + i * 3, "(a)", 3);
+	pattern[96] = '\0';
+	lua_kunit_push_string_function(L, "match");
+	lua_pushstring(L, source);
+	lua_pushstring(L, pattern);
+	status = lua_pcall(L, 2, LUA_MULTRET, 0);
+	KUNIT_ASSERT_EQ(test, status, 0);
+	KUNIT_ASSERT_EQ(test, lua_gettop(L), 32);
+	for (i = 1; i <= 32; i++) {
+		KUNIT_ASSERT_EQ(test, lua_type(L, i), LUA_TSTRING);
+		KUNIT_EXPECT_STREQ(test, lua_tostring(L, i), "a");
+	}
+}
+
 static struct kunit_case lua_string_test_cases[] = {
 	KUNIT_CASE(lua_state_lifecycle_test),
 	KUNIT_CASE(lua_string_basic_test),
@@ -409,6 +830,14 @@ static struct kunit_case lua_string_test_cases[] = {
 	KUNIT_CASE(lua_string_iterator_test),
 	KUNIT_CASE(lua_string_gsub_test),
 	KUNIT_CASE(lua_string_malformed_pattern_test),
+	KUNIT_CASE(lua_string_depth_optional_test),
+	KUNIT_CASE(lua_string_depth_capture_test),
+	KUNIT_CASE(lua_string_depth_expand_test),
+	KUNIT_CASE(lua_string_depth_api_test),
+	KUNIT_CASE(lua_string_depth_recovery_test),
+	KUNIT_CASE(lua_string_depth_candidate_test),
+	KUNIT_CASE(lua_string_depth_restore_test),
+	KUNIT_CASE(lua_string_depth_capture32_test),
 	{}
 };
 
