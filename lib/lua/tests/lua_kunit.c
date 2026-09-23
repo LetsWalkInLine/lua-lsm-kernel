@@ -11,6 +11,7 @@
 #include <linux/string.h>
 
 #include "lua_depth_test.h"
+#include "lua_work_test.h"
 
 /* The check chunk receives the exact result tuple, including trailing nils. */
 struct lua_kunit_vector {
@@ -398,6 +399,39 @@ static void lua_string_malformed_pattern_test(struct kunit *test)
 
 	lua_kunit_run_vectors(test, L, malformed_vectors,
 			      ARRAY_SIZE(malformed_vectors));
+}
+
+static void lua_string_work_behavior_test(struct kunit *test)
+{
+	static const struct {
+		const struct lua_kunit_vector *vectors;
+		size_t count;
+	} groups[] = {
+		{ basic_vectors, ARRAY_SIZE(basic_vectors) },
+		{ plain_find_vectors, ARRAY_SIZE(plain_find_vectors) },
+		{ search_path_vectors, ARRAY_SIZE(search_path_vectors) },
+		{ class_balance_vectors, ARRAY_SIZE(class_balance_vectors) },
+		{ capture_vectors, ARRAY_SIZE(capture_vectors) },
+		{ iterator_vectors, ARRAY_SIZE(iterator_vectors) },
+		{ gsub_vectors, ARRAY_SIZE(gsub_vectors) },
+		{ malformed_vectors, ARRAY_SIZE(malformed_vectors) },
+	};
+	lua_State *L;
+	size_t g, v;
+
+	/* Run the same behavior vectors against the private work-library copy.
+	 * Detailed counts and observer failures belong to lua-string-work.
+	 */
+	L = lua_kunit_new_state(test);
+	lua_kunit_open_library(test, L, luaopen_base, "");
+	lua_kunit_open_library(test, L, luaopen_string_work, LUA_STRLIBNAME);
+	for (g = 0; g < ARRAY_SIZE(groups); g++) {
+		for (v = 0; v < groups[g].count; v++) {
+			KUNIT_EXPECT_TRUE_MSG(test,
+				lua_kunit_run_vector(test, L, &groups[g].vectors[v]),
+				"private library %s", groups[g].vectors[v].id);
+		}
+	}
 }
 
 static int lua_kunit_invoke_depth_retry(lua_State *L)
@@ -830,6 +864,7 @@ static struct kunit_case lua_string_test_cases[] = {
 	KUNIT_CASE(lua_string_iterator_test),
 	KUNIT_CASE(lua_string_gsub_test),
 	KUNIT_CASE(lua_string_malformed_pattern_test),
+	KUNIT_CASE(lua_string_work_behavior_test),
 	KUNIT_CASE(lua_string_depth_optional_test),
 	KUNIT_CASE(lua_string_depth_capture_test),
 	KUNIT_CASE(lua_string_depth_expand_test),

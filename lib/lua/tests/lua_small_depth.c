@@ -11,6 +11,7 @@
 int lua_kunit_match_depth(lua_State *L)
 {
 	MatchState ms;
+	StrWork work;
 	const char *src;
 	const char *pattern;
 	const char *result;
@@ -18,7 +19,9 @@ int lua_kunit_match_depth(lua_State *L)
 
 	src = luaL_checklstring(L, 1, &len);
 	pattern = luaL_checkstring(L, 2);
+	strwork_begin(L, &work, SW_MATCH);
 	ms.L = L;
+	strwork_bind(&ms, &work);
 	ms.src_init = src;
 	ms.src_end = src + len;
 	ms.level = 0;
@@ -26,5 +29,6 @@ int lua_kunit_match_depth(lua_State *L)
 	result = match(&ms, src, pattern);
 	lua_pushboolean(L, !!result);
 	lua_pushinteger(L, ms.matchdepth);
+	strwork_end(&work);
 	return 2;
 }
