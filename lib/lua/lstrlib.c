@@ -60,9 +60,6 @@ static void strwork_begin (lua_State *L, StrWork *work, enum StrWorkAPI api) {
   strwork_charge(work, 1);
 }
 
-#define strwork_bind(ms, w) ((ms)->work = (w))
-#define strwork_ms(ms, cost) strwork_charge((ms)->work, cost)
-
 
 /* macro to `unsign' a character */
 #define uchar(c)        ((unsigned char)(c))
@@ -247,7 +244,7 @@ static int check_capture (MatchState *ms, int l) {
 static int capture_to_close (MatchState *ms) {
   int level = ms->level;
   for (level--; level>=0; level--) {
-    strwork_ms(ms, 1);
+    strwork_charge(ms->work, 1);
     if (ms->capture[level].len == CAP_UNFINISHED) return level;
   }
   return luaL_error(ms->L, "invalid pattern capture");
@@ -255,29 +252,29 @@ static int capture_to_close (MatchState *ms) {
 
 
 static const char *classend (MatchState *ms, const char *p) {
-  strwork_ms(ms, 1);
+  strwork_charge(ms->work, 1);
   switch (*p++) {
     case L_ESC: {
-      strwork_ms(ms, 1);
+      strwork_charge(ms->work, 1);
       if (*p == '\0')
         luaL_error(ms->L, "malformed pattern (ends with " LUA_QL("%%") ")");
       return p+1;
     }
     case '[': {
       if (*p == '^') {
-        strwork_ms(ms, 1);
+        strwork_charge(ms->work, 1);
         p++;
       }
       do {  /* look for a `]' */
-        strwork_ms(ms, 1);
+        strwork_charge(ms->work, 1);
         if (*p == '\0')
           luaL_error(ms->L, "malformed pattern (missing " LUA_QL("]") ")");
         if (*(p++) == L_ESC && *p != '\0') {
-          strwork_ms(ms, 1);
+          strwork_charge(ms->work, 1);
           p++;  /* skip escapes (e.g. `%]') */
         }
       } while (*p != ']');
-      strwork_ms(ms, 1);
+      strwork_charge(ms->work, 1);
       return p+1;
     }
     default: {
@@ -309,37 +306,37 @@ static int match_class (int c, int cl) {
 static int matchbracketclass (MatchState *ms, int c, const char *p,
                              const char *ec) {
   int sig = 1;
-  strwork_ms(ms, 1);  /* opening bracket */
+  strwork_charge(ms->work, 1);  /* opening bracket */
   if (*(p+1) == '^') {
-    strwork_ms(ms, 1);
+    strwork_charge(ms->work, 1);
     sig = 0;
     p++;  /* skip the `^' */
   }
   while (++p < ec) {
     if (*p == L_ESC) {
-      strwork_ms(ms, 2);
+      strwork_charge(ms->work, 2);
       p++;
       if (match_class(c, uchar(*p)))
         return sig;
     }
     else if ((*(p+1) == '-') && (p+2 < ec)) {
-      strwork_ms(ms, 3);
+      strwork_charge(ms->work, 3);
       p+=2;
       if (uchar(*(p-2)) <= c && c <= uchar(*p))
         return sig;
     }
     else {
-      strwork_ms(ms, 1);
+      strwork_charge(ms->work, 1);
       if (uchar(*p) == c) return sig;
     }
   }
-  strwork_ms(ms, 1);  /* closing bracket on exhaustion */
+  strwork_charge(ms->work, 1);  /* closing bracket on exhaustion */
   return !sig;
 }
 
 
 static int singlematch (MatchState *ms, int c, const char *p, const char *ep) {
-  strwork_ms(ms, 1);
+  strwork_charge(ms->work, 1);
   switch (*p) {
     case '.': return 1;  /* matches any char */
     case L_ESC: return match_class(c, uchar(*(p+1)));
@@ -356,14 +353,14 @@ static const char *matchbalance (MatchState *ms, const char *s,
                                    const char *p) {
   if (*p == 0 || *(p+1) == 0)
     luaL_error(ms->L, "unbalanced pattern");
-  strwork_ms(ms, 1);
+  strwork_charge(ms->work, 1);
   if (*s != *p) return NULL;
   else {
     int b = *p;
     int e = *(p+1);
     int cont = 1;
     while (++s < ms->src_end) {
-      strwork_ms(ms, 1);
+      strwork_charge(ms->work, 1);
       if (*s == e) {
         if (--cont == 0) return s+1;
       }
@@ -382,7 +379,7 @@ static const char *max_expand (MatchState *ms, const char *s,
   /* keeps trying to match with the maximum repetitions */
   while (i>=0) {
     const char *res;
-    strwork_ms(ms, 1);
+    strwork_charge(ms->work, 1);
     res = match(ms, (s+i), ep+1);
     if (res) return res;
     i--;  /* else didn't match; reduce 1 repetition to try again */
@@ -395,7 +392,7 @@ static const char *min_expand (MatchState *ms, const char *s,
                                  const char *p, const char *ep) {
   for (;;) {
     const char *res;
-    strwork_ms(ms, 1);
+    strwork_charge(ms->work, 1);
     res = match(ms, s, ep+1);
     if (res != NULL)
       return res;
@@ -437,7 +434,7 @@ static const char *match_capture (MatchState *ms, const char *s, int l) {
   len = ms->capture[l].len;
   if ((size_t)(ms->src_end-s) >= len) {
     /* Charge the requested extent, independently of memcmp's early exit. */
-    strwork_ms(ms, len);
+    strwork_charge(ms->work, len);
     if (memcmp(ms->capture[l].init, s, len) == 0)
       return s+len;
   }
@@ -446,12 +443,12 @@ static const char *match_capture (MatchState *ms, const char *s, int l) {
 
 
 static const char *match (MatchState *ms, const char *s, const char *p) {
-  strwork_ms(ms, 1);
+  strwork_charge(ms->work, 1);
   if (ms->matchdepth == 0)
     luaL_error(ms->L, "pattern recursion limit exceeded");
   ms->matchdepth--;
   init: /* using goto's to optimize tail recursion */
-  strwork_ms(ms, 1);
+  strwork_charge(ms->work, 1);
   switch (*p) {
     case '(': {  /* start capture */
       if (*(p+1) == ')')  /* position capture? */
@@ -479,12 +476,12 @@ static const char *match (MatchState *ms, const char *s, const char *p) {
                                LUA_QL("%%f") " in pattern");
           ep = classend(ms, p);  /* points to what is next */
           previous = (s == ms->src_init) ? '\0' : *(s-1);
-          strwork_ms(ms, 1);
+          strwork_charge(ms->work, 1);
           if (matchbracketclass(ms, uchar(previous), p, ep-1)) {
             s = NULL;
             goto out;
           }
-          strwork_ms(ms, 1);
+          strwork_charge(ms->work, 1);
           if (!matchbracketclass(ms, uchar(*s), p, ep-1)) {
             s = NULL;
             goto out;
@@ -517,13 +514,13 @@ static const char *match (MatchState *ms, const char *s, const char *p) {
         case '?': {  /* optional */
           const char *res;
           if (m) {
-            strwork_ms(ms, 1);
+            strwork_charge(ms->work, 1);
             if ((res=match(ms, s+1, ep+1)) != NULL) {
               s = res;
               goto out;
             }
           }
-          strwork_ms(ms, 1);
+          strwork_charge(ms->work, 1);
           p=ep+1; goto init;  /* else return match(ms, s, ep+1); */
         }
         case '*': {  /* 0 or more repetitions */
@@ -611,10 +608,10 @@ static const char *lmemfind (StrWork *work, const char *s1, size_t l1,
 
 static void push_onecapture (MatchState *ms, int i, const char *s,
                                                     const char *e) {
-  strwork_ms(ms, 1);
+  strwork_charge(ms->work, 1);
   if (i >= ms->level) {
     if (i == 0) {  /* ms->level == 0, too */
-      strwork_ms(ms, e - s);
+      strwork_charge(ms->work, e - s);
       lua_pushlstring(ms->L, s, e - s);  /* add whole match */
     }
     else
@@ -626,7 +623,7 @@ static void push_onecapture (MatchState *ms, int i, const char *s,
     if (l == CAP_POSITION)
       lua_pushinteger(ms->L, ms->capture[i].init - ms->src_init + 1);
     else {
-      strwork_ms(ms, l);
+      strwork_charge(ms->work, l);
       lua_pushlstring(ms->L, ms->capture[i].init, l);
     }
   }
@@ -668,7 +665,7 @@ static int str_find_aux (lua_State *L, int find) {
     int anchor = (*p == '^') ? (p++, 1) : 0;
     const char *s1=s+init;
     ms.L = L;
-    strwork_bind(&ms, &work);
+    ms.work = &work;
     ms.matchdepth = LUA_PATTERN_MAXDEPTH;
     ms.src_init = s;
     ms.src_end = s+l1;
@@ -715,7 +712,7 @@ static int gmatch_aux (lua_State *L) {
   const char *src;
   strwork_begin(L, &work, SW_GMATCH);
   ms.L = L;
-  strwork_bind(&ms, &work);
+  ms.work = &work;
   ms.matchdepth = LUA_PATTERN_MAXDEPTH;
   ms.src_init = s;
   ms.src_end = s+ls;
@@ -763,7 +760,7 @@ static int gfind_nodef (lua_State *L) {
 static void add_work_value (MatchState *ms, luaL_Buffer *b) {
   size_t len;
   lua_tolstring(ms->L, -1, &len);
-  strwork_ms(ms, len);
+  strwork_charge(ms->work, len);
   luaL_addvalue(b);
 }
 
@@ -773,20 +770,20 @@ static void add_s (MatchState *ms, luaL_Buffer *b, const char *s,
   size_t l, i;
   const char *news = lua_tolstring(ms->L, 3, &l);
   for (i = 0; i < l; i++) {
-    strwork_ms(ms, 1);
+    strwork_charge(ms->work, 1);
     if (news[i] != L_ESC) {
-      strwork_ms(ms, 1);
+      strwork_charge(ms->work, 1);
       luaL_addchar(b, news[i]);
     }
     else {
       i++;  /* skip ESC */
-      strwork_ms(ms, 1);
+      strwork_charge(ms->work, 1);
       if (!isdigit(uchar(news[i]))) {
-        strwork_ms(ms, 1);
+        strwork_charge(ms->work, 1);
         luaL_addchar(b, news[i]);
       }
       else if (news[i] == '0') {
-        strwork_ms(ms, e - s);
+        strwork_charge(ms->work, e - s);
         luaL_addlstring(b, s, e - s);
       }
       else {
@@ -801,7 +798,7 @@ static void add_s (MatchState *ms, luaL_Buffer *b, const char *s,
 static void add_value (MatchState *ms, luaL_Buffer *b, const char *s,
                                                        const char *e) {
   lua_State *L = ms->L;
-  strwork_ms(ms, 1);
+  strwork_charge(ms->work, 1);
   switch (lua_type(L, 3)) {
     case LUA_TNUMBER:
     case LUA_TSTRING: {
@@ -812,20 +809,20 @@ static void add_value (MatchState *ms, luaL_Buffer *b, const char *s,
       int n;
       lua_pushvalue(L, 3);
       n = push_captures(ms, s, e);
-      strwork_ms(ms, 1);
+      strwork_charge(ms->work, 1);
       lua_call(L, n, 1);
       break;
     }
     case LUA_TTABLE: {
       push_onecapture(ms, 0, s, e);
-      strwork_ms(ms, 1);
+      strwork_charge(ms->work, 1);
       lua_gettable(L, 3);
       break;
     }
   }
   if (!lua_toboolean(L, -1)) {  /* nil or false? */
     lua_pop(L, 1);
-    strwork_ms(ms, e - s);
+    strwork_charge(ms->work, e - s);
     lua_pushlstring(L, s, e - s);  /* keep original text */
   }
   else if (!lua_isstring(L, -1))
@@ -851,7 +848,7 @@ static int str_gsub (lua_State *L) {
   strwork_begin(L, &work, SW_GSUB);
   luaL_buffinit(L, &b);
   ms.L = L;
-  strwork_bind(&ms, &work);
+  ms.work = &work;
   ms.matchdepth = LUA_PATTERN_MAXDEPTH;
   ms.src_init = src;
   ms.src_end = src+srcl;
@@ -867,13 +864,13 @@ static int str_gsub (lua_State *L) {
     if (e && e>src) /* non empty match? */
       src = e;  /* skip it */
     else if (src < ms.src_end) {
-      strwork_ms(&ms, 1);
+      strwork_charge(ms.work, 1);
       luaL_addchar(&b, *src++);
     }
     else break;
     if (anchor) break;
   }
-  strwork_ms(&ms, ms.src_end-src);
+  strwork_charge(ms.work, ms.src_end-src);
   luaL_addlstring(&b, src, ms.src_end-src);
   luaL_pushresult(&b);
   lua_pushinteger(L, n);  /* number of substitutions */
