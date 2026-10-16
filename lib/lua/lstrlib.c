@@ -18,6 +18,34 @@
 #include <linux/lauxlib.h>
 #include <linux/lualib.h>
 
+#include "lstrwork.h"
+
+struct str_work {
+	lua_State *L;
+	struct str_work_budget budget;
+};
+
+static void strwork_charge(struct str_work *work, u64 cost)
+{
+	bool allowed = strwork_debit(&work->budget, cost);
+
+	if (!allowed)
+		luaL_error(work->L, "string work limit exceeded");
+}
+
+static void strwork_begin(lua_State *L, struct str_work *work)
+{
+	work->L = L;
+	work->budget.remaining = LUA_STRING_WORK_LIMIT;
+	strwork_charge(work, 1);
+}
+
+static void strwork_charge_arg(struct str_work *work, int arg)
+{
+	if (lua_type(work->L, arg) == LUA_TSTRING)
+		strwork_charge(work, lua_objlen(work->L, arg));
+}
+
 
 /* macro to `unsign' a character */
 #define uchar(c)        ((unsigned char)(c))
@@ -39,119 +67,188 @@ static ptrdiff_t posrelat (ptrdiff_t pos, size_t len) {
 }
 
 
-static int str_sub (lua_State *L) {
-  size_t l;
-  const char *s = luaL_checklstring(L, 1, &l);
-  ptrdiff_t start = posrelat(luaL_checkinteger(L, 2), l);
-  ptrdiff_t end = posrelat(luaL_optinteger(L, 3, -1), l);
-  if (start < 1) start = 1;
-  if (end > (ptrdiff_t)l) end = (ptrdiff_t)l;
-  if (start <= end)
-    lua_pushlstring(L, s+start-1, end-start+1);
-  else lua_pushliteral(L, "");
-  return 1;
+static int str_sub(lua_State *L)
+{
+	struct str_work work;
+	size_t l;
+	const char *s = luaL_checklstring(L, 1, &l);
+	ptrdiff_t start, end;
+
+	strwork_begin(L, &work);
+	strwork_charge_arg(&work, 2);
+	strwork_charge_arg(&work, 3);
+	start = posrelat(luaL_checkinteger(L, 2), l);
+	end = posrelat(luaL_optinteger(L, 3, -1), l);
+	if (start < 1)
+		start = 1;
+	if (end > (ptrdiff_t)l)
+		end = (ptrdiff_t)l;
+	if (start <= end) {
+		strwork_charge(&work, end - start + 1);
+		lua_pushlstring(L, s + start - 1, end - start + 1);
+	} else {
+		lua_pushliteral(L, "");
+	}
+	return 1;
 }
 
 
-static int str_reverse (lua_State *L) {
-  size_t l;
-  luaL_Buffer b;
-  const char *s = luaL_checklstring(L, 1, &l);
-  luaL_buffinit(L, &b);
-  while (l--) luaL_addchar(&b, s[l]);
-  luaL_pushresult(&b);
-  return 1;
+static int str_reverse(lua_State *L)
+{
+	struct str_work work;
+	size_t l;
+	luaL_Buffer b;
+	const char *s = luaL_checklstring(L, 1, &l);
+
+	strwork_begin(L, &work);
+	strwork_charge(&work, l);
+	luaL_buffinit(L, &b);
+	while (l--)
+		luaL_addchar(&b, s[l]);
+	luaL_pushresult(&b);
+	return 1;
 }
 
 
-static int str_lower (lua_State *L) {
-  size_t l;
-  size_t i;
-  luaL_Buffer b;
-  const char *s = luaL_checklstring(L, 1, &l);
-  luaL_buffinit(L, &b);
-  for (i=0; i<l; i++)
-    luaL_addchar(&b, tolower(uchar(s[i])));
-  luaL_pushresult(&b);
-  return 1;
+static int str_lower(lua_State *L)
+{
+	struct str_work work;
+	size_t l;
+	size_t i;
+	luaL_Buffer b;
+	const char *s = luaL_checklstring(L, 1, &l);
+
+	strwork_begin(L, &work);
+	strwork_charge(&work, l);
+	luaL_buffinit(L, &b);
+	for (i = 0; i < l; i++)
+		luaL_addchar(&b, tolower(uchar(s[i])));
+	luaL_pushresult(&b);
+	return 1;
 }
 
 
-static int str_upper (lua_State *L) {
-  size_t l;
-  size_t i;
-  luaL_Buffer b;
-  const char *s = luaL_checklstring(L, 1, &l);
-  luaL_buffinit(L, &b);
-  for (i=0; i<l; i++)
-    luaL_addchar(&b, toupper(uchar(s[i])));
-  luaL_pushresult(&b);
-  return 1;
+static int str_upper(lua_State *L)
+{
+	struct str_work work;
+	size_t l;
+	size_t i;
+	luaL_Buffer b;
+	const char *s = luaL_checklstring(L, 1, &l);
+
+	strwork_begin(L, &work);
+	strwork_charge(&work, l);
+	luaL_buffinit(L, &b);
+	for (i = 0; i < l; i++)
+		luaL_addchar(&b, toupper(uchar(s[i])));
+	luaL_pushresult(&b);
+	return 1;
 }
 
-static int str_rep (lua_State *L) {
-  size_t l;
-  luaL_Buffer b;
-  const char *s = luaL_checklstring(L, 1, &l);
-  int n = luaL_checkint(L, 2);
-  luaL_buffinit(L, &b);
-  while (n-- > 0)
-    luaL_addlstring(&b, s, l);
-  luaL_pushresult(&b);
-  return 1;
-}
+static int str_rep(lua_State *L)
+{
+	struct str_work work;
+	size_t l;
+	luaL_Buffer b;
+	const char *s = luaL_checklstring(L, 1, &l);
+	int n;
 
-
-static int str_byte (lua_State *L) {
-  size_t l;
-  const char *s = luaL_checklstring(L, 1, &l);
-  ptrdiff_t posi = posrelat(luaL_optinteger(L, 2, 1), l);
-  ptrdiff_t pose = posrelat(luaL_optinteger(L, 3, posi), l);
-  int n, i;
-  if (posi <= 0) posi = 1;
-  if ((size_t)pose > l) pose = l;
-  if (posi > pose) return 0;  /* empty interval; return no values */
-  n = (int)(pose -  posi + 1);
-  if (posi + n <= pose)  /* overflow? */
-    luaL_error(L, "string slice too long");
-  luaL_checkstack(L, n, "string slice too long");
-  for (i=0; i<n; i++)
-    lua_pushinteger(L, uchar(s[posi+i-1]));
-  return n;
+	strwork_begin(L, &work);
+	strwork_charge_arg(&work, 2);
+	n = luaL_checkint(L, 2);
+	if (n > 0)
+		strwork_charge(&work, n);
+	luaL_buffinit(L, &b);
+	while (n > 0) {
+		strwork_charge(&work, l);
+		luaL_addlstring(&b, s, l);
+		n--;
+	}
+	luaL_pushresult(&b);
+	return 1;
 }
 
 
-static int str_char (lua_State *L) {
-  int n = lua_gettop(L);  /* number of arguments */
-  int i;
-  luaL_Buffer b;
-  luaL_buffinit(L, &b);
-  for (i=1; i<=n; i++) {
-    int c = luaL_checkint(L, i);
-    luaL_argcheck(L, uchar(c) == c, i, "invalid value");
-    luaL_addchar(&b, uchar(c));
-  }
-  luaL_pushresult(&b);
-  return 1;
+static int str_byte(lua_State *L)
+{
+	struct str_work work;
+	size_t l;
+	const char *s = luaL_checklstring(L, 1, &l);
+	ptrdiff_t posi, pose;
+	int n, i;
+
+	strwork_begin(L, &work);
+	strwork_charge_arg(&work, 2);
+	strwork_charge_arg(&work, 3);
+	posi = posrelat(luaL_optinteger(L, 2, 1), l);
+	pose = posrelat(luaL_optinteger(L, 3, posi), l);
+	if (posi <= 0)
+		posi = 1;
+	if ((size_t)pose > l)
+		pose = l;
+	if (posi > pose)
+		return 0; /* empty interval; return no values */
+	strwork_charge(&work, pose - posi + 1);
+	n = (int)(pose - posi + 1);
+	if (posi + n <= pose) /* overflow? */
+		luaL_error(L, "string slice too long");
+	luaL_checkstack(L, n, "string slice too long");
+	for (i = 0; i < n; i++)
+		lua_pushinteger(L, uchar(s[posi + i - 1]));
+	return n;
 }
 
 
-static int writer (lua_State *L, const void* b, size_t size, void* B) {
-  (void)L;
-  luaL_addlstring((luaL_Buffer*) B, (const char *)b, size);
-  return 0;
+static int str_char(lua_State *L)
+{
+	struct str_work work;
+	int n = lua_gettop(L); /* number of arguments */
+	int i;
+	luaL_Buffer b;
+
+	strwork_begin(L, &work);
+	strwork_charge(&work, n);
+	luaL_buffinit(L, &b);
+	for (i = 1; i <= n; i++) {
+		int c;
+
+		strwork_charge_arg(&work, i);
+		c = luaL_checkint(L, i);
+		luaL_argcheck(L, uchar(c) == c, i, "invalid value");
+		luaL_addchar(&b, uchar(c));
+	}
+	luaL_pushresult(&b);
+	return 1;
 }
 
+struct str_dump_state {
+	luaL_Buffer buffer;
+	struct str_work work;
+};
 
-static int str_dump (lua_State *L) {
-  luaL_Buffer b;
-  luaL_checktype(L, 1, LUA_TFUNCTION);
-  lua_settop(L, 1);
-  luaL_buffinit(L,&b);
-  if (lua_dump(L, writer, &b) != 0)
-    luaL_error(L, "unable to dump given function");
-  luaL_pushresult(&b);
-  return 1;
+static int writer(lua_State *L, const void *b, size_t size, void *B)
+{
+	struct str_dump_state *dump = B;
+
+	(void)L;
+	strwork_charge(&dump->work, 1);
+	strwork_charge(&dump->work, size);
+	luaL_addlstring(&dump->buffer, (const char *)b, size);
+	return 0;
+}
+
+static int str_dump(lua_State *L)
+{
+	struct str_dump_state dump;
+
+	luaL_checktype(L, 1, LUA_TFUNCTION);
+	lua_settop(L, 1);
+	strwork_begin(L, &dump.work);
+	luaL_buffinit(L, &dump.buffer);
+	if (lua_dump(L, writer, &dump) != 0)
+		luaL_error(L, "unable to dump given function");
+	luaL_pushresult(&dump.buffer);
+	return 1;
 }
 
 
@@ -166,15 +263,22 @@ static int str_dump (lua_State *L) {
 #define CAP_UNFINISHED	(-1)
 #define CAP_POSITION	(-2)
 
+/* Root plus the opening and closing of each capture. */
+#ifndef LUA_PATTERN_MAXDEPTH
+#define LUA_PATTERN_MAXDEPTH (2 * LUA_MAXCAPTURES + 1)
+#endif
+
 typedef struct MatchState {
-  const char *src_init;  /* init of source string */
-  const char *src_end;  /* end (`\0') of source string */
-  lua_State *L;
-  int level;  /* total number of captures (finished or unfinished) */
-  struct {
-    const char *init;
-    ptrdiff_t len;
-  } capture[LUA_MAXCAPTURES];
+	const char *src_init; /* init of source string */
+	const char *src_end; /* end (`\0') of source string */
+	lua_State *L;
+	int level; /* total number of captures (finished or unfinished) */
+	int matchdepth; /* remaining recursive match calls */
+	struct str_work *work;
+	struct {
+		const char *init;
+		ptrdiff_t len;
+	} capture[LUA_MAXCAPTURES];
 } MatchState;
 
 
@@ -189,36 +293,51 @@ static int check_capture (MatchState *ms, int l) {
   return l;
 }
 
+static int capture_to_close(MatchState *ms)
+{
+	int level = ms->level;
 
-static int capture_to_close (MatchState *ms) {
-  int level = ms->level;
-  for (level--; level>=0; level--)
-    if (ms->capture[level].len == CAP_UNFINISHED) return level;
-  return luaL_error(ms->L, "invalid pattern capture");
+	for (level--; level >= 0; level--) {
+		strwork_charge(ms->work, 1);
+		if (ms->capture[level].len == CAP_UNFINISHED)
+			return level;
+	}
+	return luaL_error(ms->L, "invalid pattern capture");
 }
 
-
-static const char *classend (MatchState *ms, const char *p) {
-  switch (*p++) {
-    case L_ESC: {
-      if (*p == '\0')
-        luaL_error(ms->L, "malformed pattern (ends with " LUA_QL("%%") ")");
-      return p+1;
-    }
-    case '[': {
-      if (*p == '^') p++;
-      do {  /* look for a `]' */
-        if (*p == '\0')
-          luaL_error(ms->L, "malformed pattern (missing " LUA_QL("]") ")");
-        if (*(p++) == L_ESC && *p != '\0')
-          p++;  /* skip escapes (e.g. `%]') */
-      } while (*p != ']');
-      return p+1;
-    }
-    default: {
-      return p;
-    }
-  }
+static const char *classend(MatchState *ms, const char *p)
+{
+	strwork_charge(ms->work, 1);
+	switch (*p++) {
+	case L_ESC: {
+		strwork_charge(ms->work, 1);
+		if (*p == '\0')
+			luaL_error(ms->L, "malformed pattern (ends with "
+				   LUA_QL("%%") ")");
+		return p + 1;
+	}
+	case '[': {
+		if (*p == '^') {
+			strwork_charge(ms->work, 1);
+			p++;
+		}
+		do { /* look for a `]' */
+			strwork_charge(ms->work, 1);
+			if (*p == '\0')
+				luaL_error(ms->L, "malformed pattern (missing "
+					   LUA_QL("]") ")");
+			if (*(p++) == L_ESC && *p != '\0') {
+				strwork_charge(ms->work, 1);
+				p++; /* skip escapes (e.g. `%]') */
+			}
+		} while (*p != ']');
+		strwork_charge(ms->work, 1);
+		return p + 1;
+	}
+	default: {
+		return p;
+	}
+	}
 }
 
 
@@ -241,87 +360,120 @@ static int match_class (int c, int cl) {
 }
 
 
-static int matchbracketclass (int c, const char *p, const char *ec) {
-  int sig = 1;
-  if (*(p+1) == '^') {
-    sig = 0;
-    p++;  /* skip the `^' */
-  }
-  while (++p < ec) {
-    if (*p == L_ESC) {
-      p++;
-      if (match_class(c, uchar(*p)))
-        return sig;
-    }
-    else if ((*(p+1) == '-') && (p+2 < ec)) {
-      p+=2;
-      if (uchar(*(p-2)) <= c && c <= uchar(*p))
-        return sig;
-    }
-    else if (uchar(*p) == c) return sig;
-  }
-  return !sig;
+static int matchbracketclass(MatchState *ms, int c, const char *p,
+			     const char *ec)
+{
+	int sig = 1;
+
+	strwork_charge(ms->work, 1);
+	if (*(p + 1) == '^') {
+		strwork_charge(ms->work, 1);
+		sig = 0;
+		p++; /* skip the `^' */
+	}
+	while (++p < ec) {
+		if (*p == L_ESC) {
+			strwork_charge(ms->work, 2);
+			p++;
+			if (match_class(c, uchar(*p)))
+				return sig;
+		} else if ((*(p + 1) == '-') && (p + 2 < ec)) {
+			strwork_charge(ms->work, 3);
+			p += 2;
+			if (uchar(*(p - 2)) <= c && c <= uchar(*p))
+				return sig;
+		} else {
+			strwork_charge(ms->work, 1);
+			if (uchar(*p) == c)
+				return sig;
+		}
+	}
+	strwork_charge(ms->work, 1);
+	return !sig;
 }
 
 
-static int singlematch (int c, const char *p, const char *ep) {
-  switch (*p) {
-    case '.': return 1;  /* matches any char */
-    case L_ESC: return match_class(c, uchar(*(p+1)));
-    case '[': return matchbracketclass(c, p, ep-1);
-    default:  return (uchar(*p) == c);
-  }
+static int singlematch(MatchState *ms, int c, const char *p, const char *ep)
+{
+	strwork_charge(ms->work, 1);
+	switch (*p) {
+	case '.':
+		return 1; /* matches any char */
+	case L_ESC:
+		return match_class(c, uchar(*(p + 1)));
+	case '[':
+		return matchbracketclass(ms, c, p, ep - 1);
+	default:
+		return (uchar(*p) == c);
+	}
 }
 
 
-static const char *match (MatchState *ms, const char *s, const char *p);
+static const char *match(MatchState *ms, const char *s, const char *p);
 
 
-static const char *matchbalance (MatchState *ms, const char *s,
-                                   const char *p) {
-  if (*p == 0 || *(p+1) == 0)
-    luaL_error(ms->L, "unbalanced pattern");
-  if (*s != *p) return NULL;
-  else {
-    int b = *p;
-    int e = *(p+1);
-    int cont = 1;
-    while (++s < ms->src_end) {
-      if (*s == e) {
-        if (--cont == 0) return s+1;
-      }
-      else if (*s == b) cont++;
-    }
-  }
-  return NULL;  /* string ends out of balance */
+static const char *matchbalance(MatchState *ms, const char *s, const char *p)
+{
+	int b, e;
+	int cont = 1;
+
+	if (*p == 0 || *(p + 1) == 0)
+		luaL_error(ms->L, "unbalanced pattern");
+	strwork_charge(ms->work, 1);
+	if (*s != *p)
+		return NULL;
+
+	b = *p;
+	e = *(p + 1);
+	while (++s < ms->src_end) {
+		strwork_charge(ms->work, 1);
+		if (*s == e) {
+			if (--cont == 0)
+				return s + 1;
+		} else if (*s == b) {
+			cont++;
+		}
+	}
+	return NULL; /* string ends out of balance */
 }
 
 
-static const char *max_expand (MatchState *ms, const char *s,
-                                 const char *p, const char *ep) {
-  ptrdiff_t i = 0;  /* counts maximum expand for item */
-  while ((s+i)<ms->src_end && singlematch(uchar(*(s+i)), p, ep))
-    i++;
-  /* keeps trying to match with the maximum repetitions */
-  while (i>=0) {
-    const char *res = match(ms, (s+i), ep+1);
-    if (res) return res;
-    i--;  /* else didn't match; reduce 1 repetition to try again */
-  }
-  return NULL;
+static const char *max_expand(MatchState *ms, const char *s, const char *p,
+			      const char *ep)
+{
+	ptrdiff_t i = 0; /* counts maximum expand for item */
+
+	while ((s + i) < ms->src_end && singlematch(ms, uchar(*(s + i)), p, ep))
+		i++;
+	/* keeps trying to match with the maximum repetitions */
+	while (i >= 0) {
+		const char *res;
+
+		strwork_charge(ms->work, 1);
+		res = match(ms, (s + i), ep + 1);
+		if (res)
+			return res;
+		i--; /* else didn't match; reduce 1 repetition to try again */
+	}
+	return NULL;
 }
 
 
-static const char *min_expand (MatchState *ms, const char *s,
-                                 const char *p, const char *ep) {
-  for (;;) {
-    const char *res = match(ms, s, ep+1);
-    if (res != NULL)
-      return res;
-    else if (s<ms->src_end && singlematch(uchar(*s), p, ep))
-      s++;  /* try with one more repetition */
-    else return NULL;
-  }
+static const char *min_expand(MatchState *ms, const char *s, const char *p,
+			      const char *ep)
+{
+	for (;;) {
+		const char *res;
+
+		strwork_charge(ms->work, 1);
+		res = match(ms, s, ep + 1);
+		if (res)
+			return res;
+		else if (s < ms->src_end && singlematch(ms, uchar(*s), p, ep))
+			s++; /* try with one more repetition */
+		else
+			return NULL;
+	}
 }
 
 
@@ -350,134 +502,229 @@ static const char *end_capture (MatchState *ms, const char *s,
 }
 
 
-static const char *match_capture (MatchState *ms, const char *s, int l) {
-  size_t len;
-  l = check_capture(ms, l);
-  len = ms->capture[l].len;
-  if ((size_t)(ms->src_end-s) >= len &&
-      memcmp(ms->capture[l].init, s, len) == 0)
-    return s+len;
-  else return NULL;
+static const char *match_capture(MatchState *ms, const char *s, int l)
+{
+	size_t len;
+
+	l = check_capture(ms, l);
+	len = ms->capture[l].len;
+	if ((size_t)(ms->src_end - s) >= len) {
+		/* Charge the requested extent, independently of memcmp's early exit. */
+		strwork_charge(ms->work, len);
+		if (memcmp(ms->capture[l].init, s, len) == 0)
+			return s + len;
+	}
+	return NULL;
 }
 
 
-static const char *match (MatchState *ms, const char *s, const char *p) {
-  init: /* using goto's to optimize tail recursion */
-  switch (*p) {
-    case '(': {  /* start capture */
-      if (*(p+1) == ')')  /* position capture? */
-        return start_capture(ms, s, p+2, CAP_POSITION);
-      else
-        return start_capture(ms, s, p+1, CAP_UNFINISHED);
-    }
-    case ')': {  /* end capture */
-      return end_capture(ms, s, p+1);
-    }
-    case L_ESC: {
-      switch (*(p+1)) {
-        case 'b': {  /* balanced string? */
-          s = matchbalance(ms, s, p+2);
-          if (s == NULL) return NULL;
-          p+=4; goto init;  /* else return match(ms, s, p+4); */
-        }
-        case 'f': {  /* frontier? */
-          const char *ep; char previous;
-          p += 2;
-          if (*p != '[')
-            luaL_error(ms->L, "missing " LUA_QL("[") " after "
-                               LUA_QL("%%f") " in pattern");
-          ep = classend(ms, p);  /* points to what is next */
-          previous = (s == ms->src_init) ? '\0' : *(s-1);
-          if (matchbracketclass(uchar(previous), p, ep-1) ||
-             !matchbracketclass(uchar(*s), p, ep-1)) return NULL;
-          p=ep; goto init;  /* else return match(ms, s, ep); */
-        }
-        default: {
-          if (isdigit(uchar(*(p+1)))) {  /* capture results (%0-%9)? */
-            s = match_capture(ms, s, uchar(*(p+1)));
-            if (s == NULL) return NULL;
-            p+=2; goto init;  /* else return match(ms, s, p+2) */
-          }
-          goto dflt;  /* case default */
-        }
-      }
-    }
-    case '\0': {  /* end of pattern */
-      return s;  /* match succeeded */
-    }
-    case '$': {
-      if (*(p+1) == '\0')  /* is the `$' the last char in pattern? */
-        return (s == ms->src_end) ? s : NULL;  /* check end of string */
-      else goto dflt;
-    }
-    default: dflt: {  /* it is a pattern item */
-      const char *ep = classend(ms, p);  /* points to what is next */
-      int m = s<ms->src_end && singlematch(uchar(*s), p, ep);
-      switch (*ep) {
-        case '?': {  /* optional */
-          const char *res;
-          if (m && ((res=match(ms, s+1, ep+1)) != NULL))
-            return res;
-          p=ep+1; goto init;  /* else return match(ms, s, ep+1); */
-        }
-        case '*': {  /* 0 or more repetitions */
-          return max_expand(ms, s, p, ep);
-        }
-        case '+': {  /* 1 or more repetitions */
-          return (m ? max_expand(ms, s+1, p, ep) : NULL);
-        }
-        case '-': {  /* 0 or more repetitions (minimum) */
-          return min_expand(ms, s, p, ep);
-        }
-        default: {
-          if (!m) return NULL;
-          s++; p=ep; goto init;  /* else return match(ms, s+1, ep); */
-        }
-      }
-    }
-  }
+static const char *match(MatchState *ms, const char *s, const char *p)
+{
+	strwork_charge(ms->work, 1);
+	if (ms->matchdepth == 0)
+		luaL_error(ms->L, "pattern recursion limit exceeded");
+	ms->matchdepth--;
+init: /* using goto's to optimize tail recursion */
+	strwork_charge(ms->work, 1);
+	switch (*p) {
+	case '(': { /* start capture */
+		if (*(p + 1) == ')') /* position capture? */
+			s = start_capture(ms, s, p + 2, CAP_POSITION);
+		else
+			s = start_capture(ms, s, p + 1, CAP_UNFINISHED);
+		break;
+	}
+	case ')': { /* end capture */
+		s = end_capture(ms, s, p + 1);
+		break;
+	}
+	case L_ESC: {
+		switch (*(p + 1)) {
+		case 'b': { /* balanced string? */
+			s = matchbalance(ms, s, p + 2);
+			if (!s)
+				goto out;
+			p += 4;
+			goto init; /* else return match(ms, s, p+4); */
+		}
+		case 'f': { /* frontier? */
+			const char *ep;
+			char previous;
+
+			p += 2;
+			if (*p != '[')
+				luaL_error(ms->L, "missing " LUA_QL("[")
+					   " after " LUA_QL("%%f") " in pattern");
+			ep = classend(ms, p); /* points to what is next */
+			previous = (s == ms->src_init) ? '\0' : *(s - 1);
+			strwork_charge(ms->work, 1);
+			if (matchbracketclass(ms, uchar(previous), p, ep - 1)) {
+				s = NULL;
+				goto out;
+			}
+			strwork_charge(ms->work, 1);
+			if (!matchbracketclass(ms, uchar(*s), p, ep - 1)) {
+				s = NULL;
+				goto out;
+			}
+			p = ep;
+			goto init; /* else return match(ms, s, ep); */
+		}
+		default: {
+			/* Capture results (%0-%9)? */
+			if (isdigit(uchar(*(p + 1)))) {
+				s = match_capture(ms, s, uchar(*(p + 1)));
+				if (!s)
+					goto out;
+				p += 2;
+				goto init; /* else return match(ms, s, p+2) */
+			}
+			goto dflt; /* case default */
+		}
+		}
+	}
+	case '\0': { /* end of pattern */
+		break; /* match succeeded */
+	}
+	case '$': {
+		/* A trailing '$' matches the end of the string. */
+		if (*(p + 1) == '\0')
+			s = (s == ms->src_end) ? s : NULL;
+		else
+			goto dflt;
+		break;
+	}
+	default: {
+		const char *ep;
+		int m;
+
+dflt:
+		ep = classend(ms, p); /* points to what is next */
+		m = s < ms->src_end && singlematch(ms, uchar(*s), p, ep);
+		switch (*ep) {
+		case '?': { /* optional */
+			const char *res;
+
+			if (m) {
+				strwork_charge(ms->work, 1);
+				res = match(ms, s + 1, ep + 1);
+				if (res) {
+					s = res;
+					goto out;
+				}
+			}
+			strwork_charge(ms->work, 1);
+			p = ep + 1;
+			goto init; /* else return match(ms, s, ep+1); */
+		}
+		case '*': { /* 0 or more repetitions */
+			s = max_expand(ms, s, p, ep);
+			goto out;
+		}
+		case '+': { /* 1 or more repetitions */
+			s = (m ? max_expand(ms, s + 1, p, ep) : NULL);
+			goto out;
+		}
+		case '-': { /* 0 or more repetitions (minimum) */
+			s = min_expand(ms, s, p, ep);
+			goto out;
+		}
+		default: {
+			if (!m) {
+				s = NULL;
+				goto out;
+			}
+			s++;
+			p = ep;
+			goto init; /* else return match(ms, s+1, ep); */
+		}
+		}
+	}
+	}
+out:
+	ms->matchdepth++;
+	return s;
 }
 
-
-
-static const char *lmemfind (const char *s1, size_t l1,
-                               const char *s2, size_t l2) {
-  if (l2 == 0) return s1;  /* empty strings are everywhere */
-  else if (l2 > l1) return NULL;  /* avoids a negative `l1' */
-  else {
-    const char *init;  /* to search for a `*s2' inside `s1' */
-    l2--;  /* 1st char will be checked by `memchr' */
-    l1 = l1-l2;  /* `s2' cannot be found after that */
-    while (l1 > 0 && (init = (const char *)memchr(s1, *s2, l1)) != NULL) {
-      init++;   /* 1st char is already checked */
-      if (memcmp(init, s2+1, l2) == 0)
-        return init-1;
-      else {  /* correct `l1' and `s1' to try again */
-        l1 -= init-s1;
-        s1 = init;
-      }
-    }
-    return NULL;  /* not found */
-  }
+/* Keep C-NUL classification separate from length-aware plain searching. */
+static int has_specials(struct str_work *work, const char *p)
+{
+	for (;;) {
+		strwork_charge(work, 1);
+		if (*p == '\0')
+			return 0;
+		if (strchr(SPECIALS, *p))
+			return 1;
+		p++;
+	}
 }
 
+static size_t strwork_scan_limit(struct str_work *work, size_t len)
+{
+	return work->budget.remaining < len ? work->budget.remaining : len;
+}
 
-static void push_onecapture (MatchState *ms, int i, const char *s,
-                                                    const char *e) {
-  if (i >= ms->level) {
-    if (i == 0)  /* ms->level == 0, too */
-      lua_pushlstring(ms->L, s, e - s);  /* add whole match */
-    else
-      luaL_error(ms->L, "invalid capture index");
-  }
-  else {
-    ptrdiff_t l = ms->capture[i].len;
-    if (l == CAP_UNFINISHED) luaL_error(ms->L, "unfinished capture");
-    if (l == CAP_POSITION)
-      lua_pushinteger(ms->L, ms->capture[i].init - ms->src_init + 1);
-    else
-      lua_pushlstring(ms->L, ms->capture[i].init, l);
-  }
+static const char *find_first(struct str_work *work, const char *s,
+			      int c, size_t len)
+{
+	size_t allowed = strwork_scan_limit(work, len);
+	const char *found = memchr(s, uchar(c), allowed);
+	/* Charge the scanned prefix, including the first matching byte. */
+	strwork_charge(work, found ? (size_t)(found - s) + 1 : allowed);
+	if (found)
+		return found;
+	if (allowed < len)
+		strwork_charge(work, 1);
+	return NULL;
+}
+
+static const char *lmemfind(struct str_work *work, const char *s1, size_t l1,
+			    const char *s2, size_t l2)
+{
+	const char *init;
+
+	if (l2 == 0)
+		return s1; /* empty strings are everywhere */
+	if (l2 > l1)
+		return NULL; /* avoids a negative `l1' */
+
+	l2--; /* First byte is checked by find_first(). */
+	l1 -= l2; /* s2 cannot be found after that */
+	while (l1 > 0 && (init = find_first(work, s1, *s2, l1)) != NULL) {
+		strwork_charge(work, 1);
+		init++; /* First byte was already checked. */
+		strwork_charge(work, l2);
+		if (memcmp(init, s2 + 1, l2) == 0)
+			return init - 1;
+		l1 -= init - s1;
+		s1 = init;
+	}
+	return NULL; /* not found */
+}
+
+static void push_onecapture(MatchState *ms, int i, const char *s, const char *e)
+{
+	strwork_charge(ms->work, 1);
+	if (i >= ms->level) {
+		if (i == 0) { /* ms->level == 0, too */
+			strwork_charge(ms->work, e - s);
+			lua_pushlstring(ms->L, s, e - s); /* add whole match */
+		} else {
+			luaL_error(ms->L, "invalid capture index");
+		}
+	} else {
+		ptrdiff_t l = ms->capture[i].len;
+
+		if (l == CAP_UNFINISHED)
+			luaL_error(ms->L, "unfinished capture");
+		if (l == CAP_POSITION) {
+			lua_pushinteger(ms->L,
+					ms->capture[i].init - ms->src_init + 1);
+		} else {
+			strwork_charge(ms->work, l);
+			lua_pushlstring(ms->L, ms->capture[i].init, l);
+		}
+	}
 }
 
 
@@ -491,46 +738,64 @@ static int push_captures (MatchState *ms, const char *s, const char *e) {
 }
 
 
-static int str_find_aux (lua_State *L, int find) {
-  size_t l1, l2;
-  const char *s = luaL_checklstring(L, 1, &l1);
-  const char *p = luaL_checklstring(L, 2, &l2);
-  ptrdiff_t init = posrelat(luaL_optinteger(L, 3, 1), l1) - 1;
-  if (init < 0) init = 0;
-  else if ((size_t)(init) > l1) init = (ptrdiff_t)l1;
-  if (find && (lua_toboolean(L, 4) ||  /* explicit request? */
-      strpbrk(p, SPECIALS) == NULL)) {  /* or no special characters? */
-    /* do a plain search */
-    const char *s2 = lmemfind(s+init, l1-init, p, l2);
-    if (s2) {
-      lua_pushinteger(L, s2-s+1);
-      lua_pushinteger(L, s2-s+l2);
-      return 2;
-    }
-  }
-  else {
-    MatchState ms;
-    int anchor = (*p == '^') ? (p++, 1) : 0;
-    const char *s1=s+init;
-    ms.L = L;
-    ms.src_init = s;
-    ms.src_end = s+l1;
-    do {
-      const char *res;
-      ms.level = 0;
-      if ((res=match(&ms, s1, p)) != NULL) {
-        if (find) {
-          lua_pushinteger(L, s1-s+1);  /* start */
-          lua_pushinteger(L, res-s);   /* end */
-          return push_captures(&ms, NULL, 0) + 2;
-        }
-        else
-          return push_captures(&ms, s1, res);
-      }
-    } while (s1++ < ms.src_end && !anchor);
-  }
-  lua_pushnil(L);  /* not found */
-  return 1;
+static int str_find_aux(lua_State *L, int find)
+{
+	struct str_work work;
+	size_t l1, l2;
+	const char *s = luaL_checklstring(L, 1, &l1);
+	const char *p = luaL_checklstring(L, 2, &l2);
+	ptrdiff_t init;
+
+	strwork_begin(L, &work);
+	strwork_charge_arg(&work, 3);
+	init = posrelat(luaL_optinteger(L, 3, 1), l1) - 1;
+	if (init < 0)
+		init = 0;
+	else if ((size_t)(init) > l1)
+		init = (ptrdiff_t)l1;
+	if (find && (lua_toboolean(L, 4) || /* explicit request? */
+		     !has_specials(&work, p))) { /* or no special characters? */
+		/* do a plain search */
+		const char *s2 = lmemfind(&work, s + init, l1 - init, p, l2);
+
+		if (s2) {
+			lua_pushinteger(L, s2 - s + 1);
+			lua_pushinteger(L, s2 - s + l2);
+			return 2;
+		}
+	} else {
+		MatchState ms;
+		int anchor = (*p == '^') ? (p++, 1) : 0;
+		const char *s1 = s + init;
+
+		ms.L = L;
+		ms.work = &work;
+		ms.matchdepth = LUA_PATTERN_MAXDEPTH;
+		ms.src_init = s;
+		ms.src_end = s + l1;
+		do {
+			const char *res;
+
+			ms.level = 0;
+			strwork_charge(&work, 1);
+			res = match(&ms, s1, p);
+			if (res) {
+				int n;
+
+				if (find) {
+					lua_pushinteger(L,
+							s1 - s + 1); /* start */
+					lua_pushinteger(L, res - s); /* end */
+					n = push_captures(&ms, NULL, 0) + 2;
+				} else {
+					n = push_captures(&ms, s1, res);
+				}
+				return n;
+			}
+		} while (s1++ < ms.src_end && !anchor);
+	}
+	lua_pushnil(L); /* not found */
+	return 1;
 }
 
 
@@ -544,29 +809,43 @@ static int str_match (lua_State *L) {
 }
 
 
-static int gmatch_aux (lua_State *L) {
-  MatchState ms;
-  size_t ls;
-  const char *s = lua_tolstring(L, lua_upvalueindex(1), &ls);
-  const char *p = lua_tostring(L, lua_upvalueindex(2));
-  const char *src;
-  ms.L = L;
-  ms.src_init = s;
-  ms.src_end = s+ls;
-  for (src = s + (size_t)lua_tointeger(L, lua_upvalueindex(3));
-       src <= ms.src_end;
-       src++) {
-    const char *e;
-    ms.level = 0;
-    if ((e = match(&ms, src, p)) != NULL) {
-      lua_Integer newstart = e-s;
-      if (e == src) newstart++;  /* empty match? go at least one position */
-      lua_pushinteger(L, newstart);
-      lua_replace(L, lua_upvalueindex(3));
-      return push_captures(&ms, src, e);
-    }
-  }
-  return 0;  /* not found */
+static int gmatch_aux(lua_State *L)
+{
+	struct str_work work;
+	MatchState ms;
+	size_t ls;
+	const char *s = lua_tolstring(L, lua_upvalueindex(1), &ls);
+	const char *p = lua_tostring(L, lua_upvalueindex(2));
+	const char *src;
+
+	strwork_begin(L, &work);
+	ms.L = L;
+	ms.work = &work;
+	ms.matchdepth = LUA_PATTERN_MAXDEPTH;
+	ms.src_init = s;
+	ms.src_end = s + ls;
+	for (src = s + (size_t)lua_tointeger(L, lua_upvalueindex(3));
+	     src <= ms.src_end; src++) {
+		const char *e;
+
+		ms.level = 0;
+		strwork_charge(&work, 1);
+		e = match(&ms, src, p);
+		if (e) {
+			int n;
+			lua_Integer newstart = e - s;
+
+			if (e == src)
+				newstart++; /* empty match? go at least one position */
+			n = push_captures(&ms, src, e);
+			/* A failed result must leave this match available for retry. */
+			luaL_checkstack(L, 1, "updating gmatch cursor");
+			lua_pushinteger(L, newstart);
+			lua_replace(L, lua_upvalueindex(3));
+			return n;
+		}
+	}
+	return 0; /* not found */
 }
 
 
@@ -585,97 +864,135 @@ static int gfind_nodef (lua_State *L) {
                        LUA_QL("string.gmatch"));
 }
 
+/* Count direct payload requests, not buffer merging or string interning. */
+static void add_work_value(MatchState *ms, luaL_Buffer *b)
+{
+	size_t len;
 
-static void add_s (MatchState *ms, luaL_Buffer *b, const char *s,
-                                                   const char *e) {
-  size_t l, i;
-  const char *news = lua_tolstring(ms->L, 3, &l);
-  for (i = 0; i < l; i++) {
-    if (news[i] != L_ESC)
-      luaL_addchar(b, news[i]);
-    else {
-      i++;  /* skip ESC */
-      if (!isdigit(uchar(news[i])))
-        luaL_addchar(b, news[i]);
-      else if (news[i] == '0')
-          luaL_addlstring(b, s, e - s);
-      else {
-        push_onecapture(ms, news[i] - '1', s, e);
-        luaL_addvalue(b);  /* add capture to accumulated result */
-      }
-    }
-  }
+	lua_tolstring(ms->L, -1, &len);
+	strwork_charge(ms->work, len);
+	luaL_addvalue(b);
 }
 
 
-static void add_value (MatchState *ms, luaL_Buffer *b, const char *s,
-                                                       const char *e) {
-  lua_State *L = ms->L;
-  switch (lua_type(L, 3)) {
-    case LUA_TNUMBER:
-    case LUA_TSTRING: {
-      add_s(ms, b, s, e);
-      return;
-    }
-    case LUA_TFUNCTION: {
-      int n;
-      lua_pushvalue(L, 3);
-      n = push_captures(ms, s, e);
-      lua_call(L, n, 1);
-      break;
-    }
-    case LUA_TTABLE: {
-      push_onecapture(ms, 0, s, e);
-      lua_gettable(L, 3);
-      break;
-    }
-  }
-  if (!lua_toboolean(L, -1)) {  /* nil or false? */
-    lua_pop(L, 1);
-    lua_pushlstring(L, s, e - s);  /* keep original text */
-  }
-  else if (!lua_isstring(L, -1))
-    luaL_error(L, "invalid replacement value (a %s)", luaL_typename(L, -1)); 
-  luaL_addvalue(b);  /* add result to accumulator */
+static void add_s(MatchState *ms, luaL_Buffer *b, const char *s, const char *e)
+{
+	size_t l, i;
+	const char *news = lua_tolstring(ms->L, 3, &l);
+
+	for (i = 0; i < l; i++) {
+		strwork_charge(ms->work, 1);
+		if (news[i] != L_ESC) {
+			strwork_charge(ms->work, 1);
+			luaL_addchar(b, news[i]);
+		} else {
+			i++; /* skip ESC */
+			strwork_charge(ms->work, 1);
+			if (!isdigit(uchar(news[i]))) {
+				strwork_charge(ms->work, 1);
+				luaL_addchar(b, news[i]);
+			} else if (news[i] == '0') {
+				strwork_charge(ms->work, e - s);
+				luaL_addlstring(b, s, e - s);
+			} else {
+				push_onecapture(ms, news[i] - '1', s, e);
+				add_work_value(ms, b);
+			}
+		}
+	}
 }
 
+static void add_value(MatchState *ms, luaL_Buffer *b, const char *s,
+		      const char *e)
+{
+	lua_State *L = ms->L;
 
-static int str_gsub (lua_State *L) {
-  size_t srcl;
-  const char *src = luaL_checklstring(L, 1, &srcl);
-  const char *p = luaL_checkstring(L, 2);
-  int  tr = lua_type(L, 3);
-  int max_s = luaL_optint(L, 4, srcl+1);
-  int anchor = (*p == '^') ? (p++, 1) : 0;
-  int n = 0;
-  MatchState ms;
-  luaL_Buffer b;
-  luaL_argcheck(L, tr == LUA_TNUMBER || tr == LUA_TSTRING ||
-                   tr == LUA_TFUNCTION || tr == LUA_TTABLE, 3,
-                      "string/function/table expected");
-  luaL_buffinit(L, &b);
-  ms.L = L;
-  ms.src_init = src;
-  ms.src_end = src+srcl;
-  while (n < max_s) {
-    const char *e;
-    ms.level = 0;
-    e = match(&ms, src, p);
-    if (e) {
-      n++;
-      add_value(&ms, &b, src, e);
-    }
-    if (e && e>src) /* non empty match? */
-      src = e;  /* skip it */
-    else if (src < ms.src_end)
-      luaL_addchar(&b, *src++);
-    else break;
-    if (anchor) break;
-  }
-  luaL_addlstring(&b, src, ms.src_end-src);
-  luaL_pushresult(&b);
-  lua_pushinteger(L, n);  /* number of substitutions */
-  return 2;
+	strwork_charge(ms->work, 1);
+	switch (lua_type(L, 3)) {
+	case LUA_TNUMBER:
+	case LUA_TSTRING: {
+		add_s(ms, b, s, e);
+		return;
+	}
+	case LUA_TFUNCTION: {
+		int n;
+
+		lua_pushvalue(L, 3);
+		n = push_captures(ms, s, e);
+		strwork_charge(ms->work, 1);
+		lua_call(L, n, 1);
+		break;
+	}
+	case LUA_TTABLE: {
+		push_onecapture(ms, 0, s, e);
+		strwork_charge(ms->work, 1);
+		lua_gettable(L, 3);
+		break;
+	}
+	}
+	if (!lua_toboolean(L, -1)) { /* nil or false? */
+		lua_pop(L, 1);
+		strwork_charge(ms->work, e - s);
+		lua_pushlstring(L, s, e - s); /* keep original text */
+	} else if (!lua_isstring(L, -1)) {
+		luaL_error(L, "invalid replacement value (a %s)",
+			   luaL_typename(L, -1));
+	}
+	add_work_value(ms, b); /* add result to accumulator */
+}
+
+static int str_gsub(lua_State *L)
+{
+	struct str_work work;
+	size_t srcl;
+	const char *src = luaL_checklstring(L, 1, &srcl);
+	const char *p = luaL_checkstring(L, 2);
+	int tr = lua_type(L, 3);
+	int max_s;
+	int anchor = (*p == '^') ? (p++, 1) : 0;
+	int n = 0;
+	MatchState ms;
+	luaL_Buffer b;
+
+	luaL_argcheck(L,
+		      tr == LUA_TNUMBER || tr == LUA_TSTRING ||
+			      tr == LUA_TFUNCTION || tr == LUA_TTABLE,
+		      3, "string/function/table expected");
+	strwork_begin(L, &work);
+	strwork_charge_arg(&work, 4);
+	max_s = luaL_optint(L, 4, srcl + 1);
+	luaL_buffinit(L, &b);
+	ms.L = L;
+	ms.work = &work;
+	ms.matchdepth = LUA_PATTERN_MAXDEPTH;
+	ms.src_init = src;
+	ms.src_end = src + srcl;
+	while (n < max_s) {
+		const char *e;
+
+		ms.level = 0;
+		strwork_charge(&work, 1);
+		e = match(&ms, src, p);
+		if (e) {
+			n++;
+			add_value(&ms, &b, src, e);
+		}
+		if (e && e > src) { /* non empty match? */
+			src = e; /* skip it */
+		} else if (src < ms.src_end) {
+			strwork_charge(ms.work, 1);
+			luaL_addchar(&b, *src++);
+		} else {
+			break;
+		}
+		if (anchor)
+			break;
+	}
+	strwork_charge(ms.work, ms.src_end - src);
+	luaL_addlstring(&b, src, ms.src_end - src);
+	luaL_pushresult(&b);
+	lua_pushinteger(L, n); /* number of substitutions */
+	return 2;
 }
 
 /* }====================================================== */
@@ -692,33 +1009,43 @@ static int str_gsub (lua_State *L) {
 #define MAX_FORMAT	(sizeof(FLAGS) + sizeof(LUA_INTFRMLEN) + 10)
 
 
-static void addquoted (lua_State *L, luaL_Buffer *b, int arg) {
-  size_t l;
-  const char *s = luaL_checklstring(L, arg, &l);
-  luaL_addchar(b, '"');
-  while (l--) {
-    switch (*s) {
-      case '"': case '\\': case '\n': {
-        luaL_addchar(b, '\\');
-        luaL_addchar(b, *s);
-        break;
-      }
-      case '\r': {
-        luaL_addlstring(b, "\\r", 2);
-        break;
-      }
-      case '\0': {
-        luaL_addlstring(b, "\\000", 4);
-        break;
-      }
-      default: {
-        luaL_addchar(b, *s);
-        break;
-      }
-    }
-    s++;
-  }
-  luaL_addchar(b, '"');
+static void addquoted(struct str_work *work, luaL_Buffer *b, int arg)
+{
+	size_t l;
+	const char *s = luaL_checklstring(work->L, arg, &l);
+
+	strwork_charge(work, l);
+	strwork_charge(work, 2);
+	luaL_addchar(b, '"');
+	while (l--) {
+		switch (*s) {
+		case '"':
+		case '\\':
+		case '\n': {
+			strwork_charge(work, 2);
+			luaL_addchar(b, '\\');
+			luaL_addchar(b, *s);
+			break;
+		}
+		case '\r': {
+			strwork_charge(work, 2);
+			luaL_addlstring(b, "\\r", 2);
+			break;
+		}
+		case '\0': {
+			strwork_charge(work, 4);
+			luaL_addlstring(b, "\\000", 4);
+			break;
+		}
+		default: {
+			strwork_charge(work, 1);
+			luaL_addchar(b, *s);
+			break;
+		}
+		}
+		s++;
+	}
+	luaL_addchar(b, '"');
 }
 
 static const char *scanformat(lua_State *L, const char *strfrmt, char *form)
@@ -759,80 +1086,116 @@ static void addintlen (char *form) {
 }
 
 
-static int str_format (lua_State *L) {
-  int top = lua_gettop(L);
-  int arg = 1;
-  size_t sfl;
-  const char *strfrmt = luaL_checklstring(L, arg, &sfl);
-  const char *strfrmt_end = strfrmt+sfl;
-  luaL_Buffer b;
-  luaL_buffinit(L, &b);
-  while (strfrmt < strfrmt_end) {
-    if (*strfrmt != L_ESC)
-      luaL_addchar(&b, *strfrmt++);
-    else if (*++strfrmt == L_ESC)
-      luaL_addchar(&b, *strfrmt++);  /* %% */
-    else { /* format item */
-      char form[MAX_FORMAT];  /* to store the format (`%...') */
-      char buff[MAX_ITEM];  /* to store the formatted item */
-      if (++arg > top)
-        luaL_argerror(L, arg, "no value");
-      strfrmt = scanformat(L, strfrmt, form);
-      switch (*strfrmt++) {
-        case 'c': {
-          snprintf(buff, sizeof(buff), form, (int)luaL_checknumber(L, arg));
-          break;
-        }
-        case 'd':  case 'i': {
-          addintlen(form);
-          snprintf(buff, sizeof(buff), form, (LUA_INTFRM_T)luaL_checknumber(L, arg));
-          break;
-        }
-        case 'o':  case 'u':  case 'x':  case 'X': {
-          addintlen(form);
+static int str_format(lua_State *L)
+{
+	struct str_work work;
+	int top = lua_gettop(L);
+	int arg = 1;
+	size_t sfl;
+	const char *strfrmt = luaL_checklstring(L, arg, &sfl);
+	const char *strfrmt_end = strfrmt + sfl;
+	luaL_Buffer b;
+
+	strwork_begin(L, &work);
+	strwork_charge(&work, sfl);
+	luaL_buffinit(L, &b);
+	while (strfrmt < strfrmt_end) {
+		if (*strfrmt != L_ESC) {
+			strwork_charge(&work, 1);
+			luaL_addchar(&b, *strfrmt++);
+		} else if (*++strfrmt == L_ESC) {
+			strwork_charge(&work, 1);
+			luaL_addchar(&b, *strfrmt++); /* %% */
+		} else { /* format item */
+			char form[MAX_FORMAT]; /* to store the format (`%...') */
+			char buff[MAX_ITEM]; /* to store the formatted item */
+
+			if (++arg > top)
+				luaL_argerror(L, arg, "no value");
+			strfrmt = scanformat(L, strfrmt, form);
+			switch (*strfrmt++) {
+			case 'c': {
+				strwork_charge_arg(&work, arg);
+				snprintf(buff, sizeof(buff), form,
+					 (int)luaL_checknumber(L, arg));
+				break;
+			}
+			case 'd':
+			case 'i': {
+				strwork_charge_arg(&work, arg);
+				addintlen(form);
+				snprintf(buff, sizeof(buff), form,
+					 (LUA_INTFRM_T)luaL_checknumber(L, arg));
+				break;
+			}
+			case 'o':
+			case 'u':
+			case 'x':
+			case 'X': {
+				strwork_charge_arg(&work, arg);
+				addintlen(form);
 #ifndef __KERNEL__
-          snprintf(buff, sizeof(buff), form, (unsigned LUA_INTFRM_T)luaL_checknumber(L, arg));
+				snprintf(buff, sizeof(buff), form,
+					 (unsigned LUA_INTFRM_T)
+						 luaL_checknumber(L, arg));
 #else
-          snprintf(buff, sizeof(buff), form, (LUA_UINTFRM_T)luaL_checknumber(L, arg));
+				snprintf(buff, sizeof(buff), form,
+					 (LUA_UINTFRM_T)luaL_checknumber(L, arg));
 #endif
-          break;
-        }
+				break;
+			}
 #ifndef __KERNEL__
-        case 'e':  case 'E': case 'f':
-        case 'g': case 'G': {
-          snprintf(buff, sizeof(buff), form, (double)luaL_checknumber(L, arg));
-          break;
-        }
+			case 'e':
+			case 'E':
+			case 'f':
+			case 'g':
+			case 'G': {
+				strwork_charge_arg(&work, arg);
+				snprintf(buff, sizeof(buff), form,
+					 (double)luaL_checknumber(L, arg));
+				break;
+			}
 #endif
-        case 'q': {
-          addquoted(L, &b, arg);
-          continue;  /* skip the 'addsize' at the end */
-        }
-        case 's': {
-          size_t l;
-          const char *s = luaL_checklstring(L, arg, &l);
-          if (!strchr(form, '.') && l >= 100) {
-            /* no precision and string is too long to be formatted;
-               keep original string */
-            lua_pushvalue(L, arg);
-            luaL_addvalue(&b);
-            continue;  /* skip the `addsize' at the end */
-          }
-          else {
-            snprintf(buff, sizeof(buff), form, s);
-            break;
-          }
-        }
-        default: {  /* also treat cases `pnLlh' */
-          return luaL_error(L, "invalid option " LUA_QL("%%%c") " to "
-                               LUA_QL("format"), *(strfrmt - 1));
-        }
-      }
-      luaL_addlstring(&b, buff, strlen(buff));
-    }
-  }
-  luaL_pushresult(&b);
-  return 1;
+			case 'q': {
+				addquoted(&work, &b, arg);
+				continue; /* skip the 'addsize' at the end */
+			}
+			case 's': {
+				size_t l;
+				const char *s = luaL_checklstring(L, arg, &l);
+				const char *precision = strchr(form, '.');
+				size_t scanned = precision &&
+					isdigit(uchar(precision[1])) ?
+					simple_strtoul(precision + 1, NULL, 10) :
+					l;
+
+				strwork_charge(&work, scanned < l ? scanned : l);
+				if (!strchr(form, '.') && l >= 100) {
+					/*
+					 * Without a precision, keep the
+					 * original long string.
+					 */
+					lua_pushvalue(L, arg);
+					strwork_charge(&work, l);
+					luaL_addvalue(&b);
+					continue; /* skip the `addsize' at the end */
+				} else {
+					snprintf(buff, sizeof(buff), form, s);
+					break;
+				}
+			}
+			default: { /* also treat cases `pnLlh' */
+				return luaL_error(L, "invalid option "
+						  LUA_QL("%%%c") " to "
+						  LUA_QL("format"), *(strfrmt - 1));
+			}
+			}
+			strwork_charge(&work, strlen(buff));
+			luaL_addlstring(&b, buff, strlen(buff));
+		}
+	}
+	luaL_pushresult(&b);
+	return 1;
 }
 
 
@@ -880,4 +1243,3 @@ LUALIB_API int luaopen_string (lua_State *L) {
   createmetatable(L);
   return 1;
 }
-
