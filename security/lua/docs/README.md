@@ -78,3 +78,4 @@ return M
 - `USAGE.md` - build/enable and runtime management
 - `API.md` - module format, hook returns, and core APIs
 - `OBSERVABILITY.md` - stats, debug logs, and troubleshooting data
+- [Selftests](../../../tools/testing/selftests/lua_lsm/README.md) - watchdog guest build, regression and extension guide

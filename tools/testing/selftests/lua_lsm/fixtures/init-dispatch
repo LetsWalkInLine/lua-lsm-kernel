@@ -1,0 +1,24 @@
+#!/bin/sh
+. /common.sh
+for mode in ordinary table number library environment hook coroutine ok caught deny; do
+ echo test > /dispatch-$mode || fail "create $mode"
+done
+cat /dispatch-errors.lua > /sys/kernel/security/lua/register || fail 'register dispatch_errors'
+/dispatch-probe || fail 'exact errno and same task recovery'
+log 'LUA_DISPATCH: PASS same-task'
+/dispatch-probe || fail 'second task recovery'
+log 'LUA_DISPATCH: PASS other-task'
+unload_policy dispatch_errors /dispatch-ordinary
+/dispatch-probe unload || fail 'unload recovery'
+log 'LUA_DISPATCH: PASS unload'
+cat /dispatch-lazy.lua > /sys/kernel/security/lua/register || fail 'register dispatch_lazy'
+/dispatch-probe lazy || fail 'lazy load errno'
+log 'LUA_DISPATCH: PASS lazy'
+unload_policy dispatch_lazy /dispatch-ok
+/dispatch-probe unload || fail 'lazy unload recovery'
+log 'LUA_DISPATCH: PASS lazy-unload'
+log 'LUA_DISPATCH: PASS'
+sync
+reboot -f
+sleep 2
+exec sh

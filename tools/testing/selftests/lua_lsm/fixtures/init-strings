@@ -1,0 +1,20 @@
+#!/bin/sh
+. /common.sh
+for mode in ok caught uncaught; do echo x > /strings-$mode; done
+cat /strings.lua > /sys/kernel/security/lua/register || fail 'register strings'
+/strings-probe || fail 'string errno and recovery'
+unload_policy strings /strings-uncaught
+/strings-probe /strings-uncaught || fail 'strings unload'
+log 'LUA_STRINGS: PASS work'
+for mode in find match gmatch gsub capture32 find-error match-error gmatch-error gsub-error; do
+ echo x > /pattern-depth-$mode || fail "create depth $mode"
+done
+cat /pattern-depth.lua > /sys/kernel/security/lua/register || fail 'register depth'
+for mode in find match gmatch gsub capture32 find-error match-error gmatch-error gsub-error; do
+ /strings-probe /pattern-depth-$mode deny || fail "depth $mode"
+done
+unload_policy pattern_depth /strings-ok
+log 'LUA_STRINGS: PASS depth65-66'
+log 'LUA_STRINGS: PASS'
+sync
+reboot -f

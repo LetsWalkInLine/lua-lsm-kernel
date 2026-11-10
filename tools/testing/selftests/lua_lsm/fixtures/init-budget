@@ -1,0 +1,24 @@
+#!/bin/sh
+. /common.sh
+for mode in loop pcall xpcall handler environment hook coroutine callback return ok caught deny; do
+ echo test > /budget-$mode || fail "create $mode"
+done
+cat /budget-errors.lua > /sys/kernel/security/lua/register || fail 'register budget_errors'
+/budget-probe || fail 'exact errno and same task recovery'
+log 'LUA_BUDGET: PASS same-task'
+/budget-probe || fail 'second task recovery'
+log 'LUA_BUDGET: PASS other-task'
+unload_policy budget_errors /budget-loop
+/budget-probe unload || fail 'unload recovery'
+log 'LUA_BUDGET: PASS unload'
+cat /budget-lazy.lua > /sys/kernel/security/lua/register || fail 'register budget_lazy'
+/budget-probe lazy || fail 'lazy load errno'
+log 'LUA_BUDGET: PASS lazy'
+unload_policy budget_lazy /budget-ok
+/budget-probe unload || fail 'lazy unload recovery'
+log 'LUA_BUDGET: PASS lazy-unload'
+log 'LUA_BUDGET: PASS'
+sync
+reboot -f
+sleep 2
+exec sh

@@ -1,0 +1,43 @@
+#!/bin/sh
+. /common.sh
+echo x > /strings-ok
+mkdir -p /run
+mount -t tmpfs tmpfs /run || fail 'run mount'
+mkdir -p /run/netns
+/bin/ip netns add peer || fail 'netns'
+/bin/ip link add rx type veth peer name tx || fail 'veth'
+/bin/ip link set dev tx netns peer || fail 'move veth'
+/bin/ip addr add 192.0.2.1/24 dev rx || fail 'rx address'
+/bin/ip link set dev rx up || fail 'rx up'
+/bin/ip netns exec peer /bin/ip addr add 192.0.2.2/24 dev tx || fail 'tx address'
+/bin/ip netns exec peer /bin/ip link set dev tx up || fail 'tx up'
+exchange()
+{
+ rm -f /tmp/rx-ready
+ /receive-probe recv "$1" &
+ receiver=$!
+ tries=0
+ while ! test -f /tmp/rx-ready; do
+  tries=$((tries+1))
+  test "$tries" -lt 100 || fail 'receiver readiness'
+  sleep .02
+ done
+ /receive-probe send x || fail 'send'
+ wait "$receiver" || fail "receive $1"
+}
+cat /receive-allow.lua > /sys/kernel/security/lua/register || fail 'allow policy'
+exchange allow
+unload_policy receive_allow /strings-ok
+log 'LUA_RX: PASS allow'
+cat /receive.lua > /sys/kernel/security/lua/register || fail 'timeout policy'
+exchange drop
+unload_policy receive /strings-ok
+log 'LUA_RX: PASS timeout'
+cat /receive-allow.lua > /sys/kernel/security/lua/register || fail 'recovery policy'
+exchange allow
+unload_policy receive_allow /strings-ok
+log 'LUA_RX: PASS recovery'
+/bin/ip netns del peer || fail 'netns cleanup'
+log 'LUA_RX: PASS'
+sync
+reboot -f

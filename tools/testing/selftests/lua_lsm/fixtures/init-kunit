@@ -1,0 +1,6 @@
+#!/bin/sh
+. /common.sh
+sync
+reboot -f
+sleep 2
+exec sh
