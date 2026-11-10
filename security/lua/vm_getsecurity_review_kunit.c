@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /* Private production wrapper/converter; only allocation/free are interposed. */
 #include <kunit/test.h>
+#include "tests/test-common.h"
 #include <linux/lauxlib.h>
 #include <linux/lualib.h>
 #include <linux/slab.h>
@@ -156,6 +157,6 @@ static void getsecurity_completion_owns_output(struct kunit *test)
 }
 
 static struct kunit_case cases[] = {KUNIT_CASE(getsecurity_completion_owns_output), {}};
-static struct kunit_suite suite = {.name="lua-lsm-budget-output-review", .test_cases=cases};
+static struct kunit_suite suite = {.name="lua-lsm-budget-output-review", .init=lua_lsm_test_init, .test_cases=cases};
 kunit_test_suite(suite);
 MODULE_LICENSE("GPL");

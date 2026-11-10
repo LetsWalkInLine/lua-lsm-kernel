@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /* Return-hook lifetime regression, using the production dispatcher. */
 #include <kunit/test.h>
+#include "tests/test-common.h"
 #include <linux/lauxlib.h>
 #include <linux/lualib.h>
 #include "lsm.h"
@@ -91,6 +92,6 @@ static struct kunit_case cases[] = {
 	KUNIT_CASE(return_hook_isolation_between_modules),
 	{}
 };
-static struct kunit_suite suite = {.name="lua-lsm-budget-return-review", .test_cases=cases};
+static struct kunit_suite suite = {.name="lua-lsm-budget-return-review", .init=lua_lsm_test_init, .test_cases=cases};
 kunit_test_suite(suite);
 MODULE_LICENSE("GPL");

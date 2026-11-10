@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /* Production VM and dispatchers. Dangerous programs run only in watchdog guests. */
 #include <kunit/test.h>
+#include "tests/test-common.h"
 #include <linux/delay.h>
 #include <linux/interrupt.h>
 #include <linux/completion.h>
@@ -92,7 +93,7 @@ static void reliable_termination(struct kunit *test)
 		start = ktime_get_ns();
 		KUNIT_EXPECT_EQ_MSG(test, lua_lsm_file_open(NULL), -EIO, "program %d", i);
 		elapsed = ktime_get_ns() - start;
-		KUNIT_EXPECT_GE_MSG(test, elapsed, LUA_LSM_BUDGET_TASK_NS, "early ordinary error %d", i);
+		KUNIT_EXPECT_GE_MSG(test, elapsed, lua_lsm_budget_ns(), "early ordinary error %d", i);
 		kunit_info(test, "timeout program=%d elapsed_ns=%llu\n", i, elapsed);
 		clean_state(test);
 		KUNIT_EXPECT_EQ_MSG(test, lua_lsm_file_open(NULL), 0, "reuse %d", i);
@@ -167,7 +168,7 @@ static int observe(lua_State *L)
 
 static int spend(lua_State *L)
 {
-	u64 until = ktime_get_ns() + LUA_LSM_BUDGET_TASK_NS * 3 / 5;
+	u64 until = ktime_get_ns() + lua_lsm_budget_ns() * 3 / 5;
 	while ((s64)(ktime_get_ns() - until) < 0)
 		cpu_relax();
 	return 0;
@@ -327,7 +328,7 @@ static void contexts(struct kunit *test)
 	set_helper(observe);
 	register_code(test, "", "budget_helper();return true");
 	KUNIT_EXPECT_EQ(test, lua_lsm_file_open(NULL), 0);
-	KUNIT_EXPECT_GT(test, observed_budget, LUA_LSM_BUDGET_TASK_NS / 2);
+	KUNIT_EXPECT_GT(test, observed_budget, lua_lsm_budget_ns() / 2);
 	preempt_disable();
 	result = lua_lsm_file_open(NULL);
 	budget = observed_budget;
@@ -492,6 +493,6 @@ static struct kunit_case cases[] = {
 	KUNIT_CASE(postpone_after_timeout),
 	{}
 };
-static struct kunit_suite suite = {.name="lua-lsm-vm-budget", .test_cases=cases};
+static struct kunit_suite suite = {.name="lua-lsm-vm-budget", .init=lua_lsm_test_init, .test_cases=cases};
 kunit_test_suite(suite);
 MODULE_LICENSE("GPL");

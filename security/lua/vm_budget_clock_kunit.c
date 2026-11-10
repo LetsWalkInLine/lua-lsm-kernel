@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /* Private copy changes only the clock and symbol names; no production observer. */
 #include <kunit/test.h>
+#include "tests/test-common.h"
 #include <linux/timekeeping.h>
 #include <linux/lauxlib.h>
 #include "lsm.h"
@@ -78,6 +79,6 @@ static struct kunit_case cases[] = {
 	KUNIT_CASE(nested_budget_cannot_reset),
 	{}
 };
-static struct kunit_suite suite = {.name="lua-lsm-budget-clock", .test_cases=cases};
+static struct kunit_suite suite = {.name="lua-lsm-budget-clock", .init=lua_lsm_test_init, .test_cases=cases};
 kunit_test_suite(suite);
 MODULE_LICENSE("GPL");

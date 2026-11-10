@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 #include <kunit/test.h>
+#include "tests/test-common.h"
 #include <linux/timekeeping.h>
 #include "lsm.h"
 #include "lsm_defs.h"
@@ -52,6 +53,6 @@ static void budget_benchmark(struct kunit *test)
 }
 
 static struct kunit_case cases[] = { KUNIT_CASE(budget_benchmark), {} };
-static struct kunit_suite suite = {.name="lua-lsm-budget-benchmark", .test_cases=cases};
+static struct kunit_suite suite = {.name="lua-lsm-budget-benchmark", .init=lua_lsm_test_init, .test_cases=cases};
 kunit_test_suite(suite);
 MODULE_LICENSE("GPL");

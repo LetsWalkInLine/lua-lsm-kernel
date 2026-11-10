@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /* Exercise production dispatchers; all injection stays in this test object. */
 #include <kunit/test.h>
+#include "tests/test-common.h"
 #include <linux/completion.h>
 #include <linux/interrupt.h>
 #include <linux/lauxlib.h>
@@ -392,6 +393,7 @@ static struct kunit_case dispatch_cases[] = {
 };
 static struct kunit_suite dispatch_suite = {
 	.name = "lua-lsm-dispatch-errors",
+	.init = lua_lsm_test_init,
 	.test_cases = dispatch_cases,
 };
 kunit_test_suite(dispatch_suite);

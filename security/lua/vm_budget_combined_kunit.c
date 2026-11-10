@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 #include <kunit/test.h>
+#include "tests/test-common.h"
 #include "lsm.h"
 #include "lsm_defs.h"
 
@@ -19,6 +20,6 @@ static void ordinary_string_limits_remain_catchable(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, lua_lsm_file_open(NULL), 0);
 }
 static struct kunit_case cases[] = {KUNIT_CASE(ordinary_string_limits_remain_catchable), {}};
-static struct kunit_suite suite = {.name="lua-lsm-budget-combined", .test_cases=cases};
+static struct kunit_suite suite = {.name="lua-lsm-budget-combined", .init=lua_lsm_test_init, .test_cases=cases};
 kunit_test_suite(suite);
 MODULE_LICENSE("GPL");

@@ -376,6 +376,16 @@ static void format_test(struct kunit *test)
 {
 	struct limit_fixture *f = test->priv;
 
+	lua_pushinteger(f->L, 4294967297LL);
+	lua_setglobal(f->L, "format_wide");
+	lua_pushinteger(f->L, -9223372036854775807LL - 1);
+	lua_setglobal(f->L, "format_min");
+	run(test, "assert(string.format('%d:%i:%x:%X:%o:%u',"
+	    "format_wide,format_wide,format_wide,format_wide,format_wide,format_wide)=="
+	    "'4294967297:4294967297:100000001:100000001:40000000001:4294967297')", 0);
+	run(test, "assert(string.format('%d',format_min)=='-9223372036854775808');"
+	    "assert(string.format('%u',-1)=='18446744073709551615');"
+	    "assert(string.format('%d',-format_wide)=='-4294967297')", 0);
 	boundary(test, "assert(string.format('abc')=='abc')", 7);
 	boundary(test, "assert(string.format('%%')=='%')", 4);
 	boundary(test, "assert(string.format('%d',42)=='42')", 5);
