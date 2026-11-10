@@ -16,6 +16,23 @@ def digest(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def source_commit():
+    """Return source-tree metadata when available; installed tests need none."""
+    here = Path(__file__).resolve().parent
+    for source in here.parents:
+        if source / "tools/testing/selftests/lua_lsm" != here:
+            continue
+        if not (source / ".git").exists():
+            continue
+        try:
+            git = subprocess.run(["git", "-C", str(source), "rev-parse", "HEAD"],
+                                 capture_output=True, text=True)
+        except OSError:
+            return None
+        return git.stdout.strip() if git.returncode == 0 else None
+    return None
+
+
 def check_log(log, mode):
     log = re.sub(r"^\[\s*\d+\.\d+\]\s*", "", log, flags=re.M)
     if re.search(r"BUG:|WARNING:|Oops:|Kernel panic|KASAN:|UBSAN:|FAIL:|"
@@ -102,7 +119,7 @@ def make_image(out, mode, busybox, ip):
     if mode == "dump32":
         subprocess.run(["python3", str(Path(__file__).with_name("generate-dump.py")), str(root)], check=True)
     if mode == "network":
-        (root / "bin/ip").unlink()
+        (root / "bin/ip").unlink(missing_ok=True)
         copy_executable(ip, root, "bin/ip")
     names = ["."] + [str(p.relative_to(root)) for p in sorted(root.rglob("*"))]
     archive = subprocess.run(["cpio", "--null", "-o", "--format=newc", "--owner=0:0"],
@@ -139,13 +156,12 @@ def main():
     image = make_image(out, args.mode, busybox, args.ip)
     identity = {"mode": args.mode, "busybox_sha256": digest(busybox),
                 "initramfs_sha256": digest(image)}
-    source = Path(__file__).resolve().parents[4]
     identity["test_sources"] = {str(p.relative_to(Path(__file__).parent)): digest(p)
                                 for p in sorted(Path(__file__).parent.rglob("*"))
                                 if p.is_file() and "__pycache__" not in str(p)}
-    git = subprocess.run(["git", "-C", str(source), "rev-parse", "HEAD"],
-                         capture_output=True, text=True)
-    identity["source_commit"] = git.stdout.strip()
+    commit = source_commit()
+    if commit is not None:
+        identity["source_commit"] = commit
     if args.config:
         shutil.copyfile(args.config, out / "kernel.config")
         identity["config_sha256"] = digest(out / "kernel.config")

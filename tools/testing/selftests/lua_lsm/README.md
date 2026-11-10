@@ -46,7 +46,8 @@ skip (4) if host prerequisites are missing. A booted guest missing an expected
 kernel feature fails. Each output directory must be new. `run-qemu.py` returns
 nonzero for watchdog/QEMU failure, diagnostics, failed cases, or missing success
 markers. It saves console.log, exit-status and identity.json (kernel, initramfs,
-BusyBox and test hashes, command line, source commit and config if supplied).
+BusyBox and test hashes, command line, source commit when run from a Git source
+checkout, and config if supplied). Installed copies work without a source checkout or Git executable.
 Keep the build manifest with these files: a git commit alone cannot identify
 uncommitted build inputs. `--check-log` validates text only; it does not establish
 kernel identity or QEMU exit status. `--prepare-only` builds an initramfs without
@@ -91,6 +92,10 @@ instrumented copy of the string library, and `security/lua/*kunit.c` exercises
 production dispatchers and private budget-clock/converter copies. No production
 observer is added. KUnit must also run under the host watchdog: several cases
 intentionally loop forever unless the deadline implementation works.
+
+Host packaging regressions can be checked without a kernel or QEMU:
+`python3 tools/testing/selftests/lua_lsm/runner_test.py` (or `python3 runner_test.py`
+in an installed copy).
 
 ## Add a case
 
