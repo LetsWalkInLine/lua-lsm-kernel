@@ -454,8 +454,11 @@ static void dump_test(struct kunit *test)
 	Proto *p = kunit_kcalloc(test, 33, sizeof(*p), GFP_KERNEL);
 	Proto **links = kunit_kcalloc(test, 33, sizeof(*links), GFP_KERNEL);
 	unsigned int i;
-	/* Header: 12 bytes, one block. Each empty prototype: 44 bytes, 15 blocks. */
-	u64 cost = 1 + 13 + 32 * (44 + 15);
+	/* DumpFunction: source size, eight ints, four chars; 15 writer calls. */
+	size_t proto_bytes = sizeof(size_t) + 8 * sizeof(int) + 4 * sizeof(char);
+	size_t dump_bytes = LUAC_HEADERSIZE + 32 * proto_bytes;
+	/* Initial charge, then one unit per writer call plus its byte count. */
+	u64 cost = 1 + (LUAC_HEADERSIZE + 1) + 32 * (proto_bytes + 15);
 
 	KUNIT_ASSERT_NOT_NULL(test, p);
 	KUNIT_ASSERT_NOT_NULL(test, links);
@@ -470,7 +473,7 @@ static void dump_test(struct kunit *test)
 	f->trace.limit = cost;
 	call_dump(test, p, 0);
 	KUNIT_EXPECT_EQ(test, record(test, false)->remaining, 0ULL);
-	KUNIT_EXPECT_EQ(test, lua_objlen(f->L, -1), (size_t)(12 + 32 * 44));
+	KUNIT_EXPECT_EQ(test, lua_objlen(f->L, -1), dump_bytes);
 	links[31] = &p[32];
 	p[31].p = &links[31];
 	p[31].sizep = 1;
