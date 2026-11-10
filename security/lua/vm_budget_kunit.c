@@ -149,8 +149,11 @@ static void lazy_lookup_and_categories(struct kunit *test)
 }
 
 /* C helper returns after the deadline: no following Lua instruction may run. */
+static unsigned int overrun_calls;
+
 static int overrun(lua_State *L)
 {
+	overrun_calls++;
 	G(L)->deadline = ktime_get_ns() - 1;
 	return 0;
 }
@@ -187,7 +190,7 @@ static void shared_deadline_and_c_return(struct kunit *test)
 		"budget_helper();M.escaped=true;return true",
 		"pcall(budget_helper);M.escaped=true;return true",
 		"xpcall(budget_helper,function()M.escaped=true end);M.escaped=true",
-		"coroutine.resume(coroutine.create(budget_helper));M.escaped=true",
+		"coroutine.resume(coroutine.create(function()budget_helper();M.escaped=true end));M.escaped=true",
 		"string.gsub('a','.',function()budget_helper();M.escaped=true end);M.escaped=true",
 	};
 	int i;
@@ -196,7 +199,9 @@ static void shared_deadline_and_c_return(struct kunit *test)
 	for (i=0; i<ARRAY_SIZE(bodies); i++) {
 		lua_State *L;
 		register_code(test, "", bodies[i]);
+		overrun_calls = 0;
 		KUNIT_EXPECT_EQ(test, lua_lsm_file_open(NULL), -EIO);
+		KUNIT_EXPECT_EQ_MSG(test, overrun_calls, 1U, "helper invocation %d", i);
 		L = lvm_get();
 		lua_getfield(L, LUA_REGISTRYINDEX, "_MODULES");
 		lua_getfield(L, -1, "budget_first");
