@@ -32,3 +32,5 @@ lua-lib-y := \
 	lstrlib.o \
 	loadlib.o \
 	linit.o
+
+obj-$(CONFIG_LUA_KUNIT_TEST) += tests/

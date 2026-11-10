@@ -647,3 +647,8 @@ config LUA
 	depends on HAS_LUA
 	select ARCH_SETJMP
 	default n
+
+config LUA_KUNIT_TEST
+	bool "KUnit tests for the Lua string library"
+	depends on KUNIT=y && LUA=y
+	default n
