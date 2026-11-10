@@ -2,7 +2,7 @@
 . /common.sh
 echo x > /dump32-reg-target
 cat /dump-register32.luac > /sys/kernel/security/lua/register || fail "register dump32"
-if cat /dump32-reg-target >/dev/null;then fail "dump32 registered callback";fi
+/strings-probe /dump32-reg-target deny || fail "dump32 registered callback errno"
 unload_policy dump_reg32 /dump32-reg-target
 log "LUA_DUMP32: PASS register32"
 if cat /dump-register33.luac > /sys/kernel/security/lua/register;then fail "registered depth33";fi
@@ -11,11 +11,13 @@ log "LUA_DUMP32: PASS register33-reject"
 echo x > /dump32-source
 echo x > /dump33-caught
 cat /dump-boundary.lua > /sys/kernel/security/lua/register || fail "register boundary"
-if cat /dump32-source >/dev/null;then fail "source32 execution";fi
+/strings-probe /dump32-source deny || fail "source32 execution errno"
 log "LUA_DUMP32: PASS source32"
-if cat /dump33-caught >/dev/null;then fail "source33 recovery";fi
+/strings-probe /dump33-caught deny || fail "source33 recovery errno"
 log "LUA_DUMP32: PASS source33-recovery"
 unload_policy dump_boundary /dump32-source
+/strings-probe /dump32-source || fail "source32 unload recovery errno"
+/strings-probe /dump33-caught || fail "source33 unload recovery errno"
 log "LUA_DUMP32: PASS unload"
 log "LUA_DUMP32: PASS"
 sync

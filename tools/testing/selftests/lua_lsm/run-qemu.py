@@ -112,9 +112,10 @@ def make_image(out, mode, busybox, ip):
     (root / "init").chmod(0o755)
     for policy in [*guest.glob("*.lua"), guest / "common.sh"]:
         shutil.copyfile(policy, root / policy.name)
-    if mode in ["dispatch", "budget", "strings", "network"]:
+    if mode in ["dispatch", "budget", "strings", "network", "dump32"]:
+        probe = "receive" if mode == "network" else "strings" if mode == "dump32" else mode
         subprocess.run(["cc", "-static", "-O2", "-Wall", "-Wextra", "-Werror",
-                        str(guest / (("receive" if mode == "network" else mode) + "-probe.c")), "-o", str(root / (("receive" if mode == "network" else mode) + "-probe"))],
+                        str(guest / (probe + "-probe.c")), "-o", str(root / (probe + "-probe"))],
                        check=True)
     if mode == "dump32":
         subprocess.run(["python3", str(Path(__file__).with_name("generate-dump.py")), str(root)], check=True)

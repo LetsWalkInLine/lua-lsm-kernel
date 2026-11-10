@@ -78,6 +78,10 @@ entry66 rejection is exercised with small inputs across all four APIs.
 converts exact numeric constants to the kernel's integer ABI, checking chunk
 layout and depth. It generates the input blobs only in the guest packaging
 directory. This isolates dump traversal from the kernel parser's C-stack limit.
+The dump guest reuses `strings-probe` to require exact EACCES after successful
+registration callback, depth-32 export/execution, and depth-33 caught-error
+recovery assertions. EIO from a Lua execution failure fails the guest; after
+unload, the same probe requires successful opens.
 
 The test-only kretprobe in `security/lua/tests/receive_probe.c` logs the actual
 receive dispatcher return and `in_serving_softirq()` context. The network checker
