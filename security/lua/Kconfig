@@ -25,3 +25,26 @@ config SECURITY_LUA_LSM_DEBUG
 	  This enables debugging code designed to help Lua-LSM kernel
 	  developers, unless you know what this does in the kernel code you
 	  should leave this disabled.
+
+config SECURITY_LUA_LSM_KUNIT_TEST
+	bool "KUnit tests for Lua-LSM errors and execution budgets"
+	depends on SECURITY_LUA_LSM=y && KUNIT=y && AUDIT
+	default n
+	help
+	  Test hook error propagation, return mapping, VM recovery and
+	  allocation failures using the production Lua-LSM dispatchers.
+
+config SECURITY_LUA_LSM_BENCHMARK
+	bool "Lua-LSM execution budget benchmark"
+	depends on SECURITY_LUA_LSM=y && KUNIT=y
+	default n
+	help
+	  Explicit performance experiment; excluded from functional regression.
+
+config SECURITY_LUA_LSM_TEST_PROBE
+	bool "Lua-LSM receive selftest observer"
+	depends on SECURITY_LUA_LSM=y && KPROBES && SECURITY_NETWORK
+	default n
+	help
+	  Log actual receive hook return values and softirq context with a
+	  kretprobe. Enable only in a disposable selftest guest.
