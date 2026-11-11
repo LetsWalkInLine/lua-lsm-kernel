@@ -1,8 +1,11 @@
 # Lua-LSM selftests
 
-This branch combines string limits (91395b488), policy error handling
-(f73f03bf9) and VM deadlines (48725984e). The merge commit before the test
-commits is the production baseline. Existing production PR branches are intact.
+This branch combines string limits and the integer-format ABI fix
+(53b3c7256, PR #36), policy error handling (f73f03bf9, PR #38), and VM deadlines
+(48725984e, PR #39). The production baseline is `pr/lua-lsm-test-base`; compare
+that branch with `pr/lua-lsm-tests` to review only the test additions. The
+integer-format fix belongs to the production baseline, not the test increment.
+Existing production PR branches are intact.
 Rebase the test commits onto their merged equivalent when those PRs land.
 
 Run on an x86_64 Linux host. Every policy runs in a disposable QEMU TCG guest
