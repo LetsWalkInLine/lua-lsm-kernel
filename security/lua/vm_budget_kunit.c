@@ -432,7 +432,7 @@ static void exit_before_interval(struct kunit *test)
 	clean_state(test);
 }
 
-static int latency_run(lua_State *L)
+static int expiry_run(lua_State *L)
 {
 	lua_settop(L, 0);
 	lua_getglobal(L, "budget_loop");
@@ -440,16 +440,15 @@ static int latency_run(lua_State *L)
 	lua_call(L, 0, 0);
 	return 0;
 }
-static void deadline_latency(struct kunit *test)
+static void deadline_expiry(struct kunit *test)
 {
 	lua_State *L = lvm_get();
-	int i;
 
 	KUNIT_ASSERT_EQ(test, luaL_loadstring(L, "while true do end\n"), 0);
 	lua_setglobal(L, "budget_loop");
-	for (i = 0; i < 1; i++) {
+	{
 		u64 start = ktime_get_ns(), elapsed;
-		int status = lua_cpcall(L, latency_run, NULL);
+		int status = lua_cpcall(L, expiry_run, NULL);
 		elapsed = ktime_get_ns() - start;
 		KUNIT_EXPECT_EQ(test, status, LUA_ERRTIME);
 		KUNIT_EXPECT_EQ(test, lua_budget_end(L), LUA_ERRTIME);
@@ -489,7 +488,7 @@ static struct kunit_case cases[] = {
 	KUNIT_CASE(contexts),
 	KUNIT_CASE(independent_checkpoint),
 	KUNIT_CASE(exit_before_interval),
-	KUNIT_CASE(deadline_latency),
+	KUNIT_CASE(deadline_expiry),
 	KUNIT_CASE(postpone_after_timeout),
 	{}
 };

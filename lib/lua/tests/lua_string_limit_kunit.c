@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
 #include <kunit/test.h>
-#include <linux/ktime.h>
 #include <linux/lauxlib.h>
 #include <linux/lualib.h>
 #include <linux/module.h>
@@ -557,12 +556,10 @@ static void corpus_test(struct kunit *test)
 
 	set_blob(test, "page", 4096, 'a');
 	for (i = 0; i < ARRAY_SIZE(cases); i++) {
-		u64 start = ktime_get_ns();
-
 		run(test, cases[i].chunk, 0);
 		KUNIT_EXPECT_EQ_MSG(test, record(test, false)->total, cases[i].cost, "%s", cases[i].name);
-		kunit_info(test, "STRING_CORPUS %s work=%llu elapsed_ns=%llu", cases[i].name,
-			   record(test, false)->total, ktime_get_ns() - start);
+		kunit_info(test, "STRING_CORPUS %s work=%llu", cases[i].name,
+			   record(test, false)->total);
 	}
 	f->trace.limit = DEFAULT_LIMIT;
 	set_blob(test, "xattr_value", 65536, 'a');

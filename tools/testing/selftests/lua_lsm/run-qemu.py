@@ -59,10 +59,6 @@ def check_log(log, mode):
         tail = log.split("LUA_RX: PASS timeout", 1)[-1]
         if "LUA_RX_OBSERVER: softirq=1 ret=0" not in tail:
             raise ValueError("no successful receive hook after timeout")
-    elif mode == "benchmark":
-        required += ["ok 1 budget_benchmark"]
-        if len(re.findall(r"BUDGET_BENCH name=", log)) != 70:
-            raise ValueError("benchmark requires exactly 70 rows")
     elif mode == "kunit":
         for name, count in [("lua-string-limits", 14), ("lua-lsm-dispatch-errors", 8),
                             ("lua-lsm-vm-budget", 10), ("lua-lsm-budget-clock", 2),
@@ -108,7 +104,7 @@ def make_image(out, mode, busybox, ip):
             raise ValueError("unexpected busybox applet: " + applet)
         (root / "bin" / applet).symlink_to("busybox")
     guest = Path(__file__).resolve().parent / "fixtures"
-    shutil.copyfile(guest / ("init-kunit" if mode == "benchmark" else "init-" + mode), root / "init")
+    shutil.copyfile(guest / ("init-" + mode), root / "init")
     (root / "init").chmod(0o755)
     for policy in [*guest.glob("*.lua"), guest / "common.sh"]:
         shutil.copyfile(policy, root / policy.name)
@@ -133,7 +129,7 @@ def make_image(out, mode, busybox, ip):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--mode", choices=["kunit", "dispatch", "budget", "strings", "dump32", "network", "benchmark"], required=True)
+    parser.add_argument("--mode", choices=["kunit", "dispatch", "budget", "strings", "dump32", "network"], required=True)
     parser.add_argument("--check-log", type=Path, help="validate an existing log only")
     parser.add_argument("--output", type=Path, help="new directory; must not exist")
     parser.add_argument("--kernel", type=Path)
@@ -174,9 +170,7 @@ def main():
                 "-smp", "2", "-m", "2048", "-nodefaults", "-no-reboot",
                 "-display", "none", "-monitor", "none", "-serial", "stdio",
                 "-kernel", str(kernel), "-initrd", str(image), "-append", append]
-        if args.mode == "benchmark":
-            argv[-1] += " kunit.filter_glob=lua-lsm-budget-benchmark"
-        elif args.mode != "kunit":
+        if args.mode != "kunit":
             argv[-1] += " kunit.enable=0"
         identity.update(kernel_sha256=digest(kernel), argv=argv)
     (out / "identity.json").write_text(json.dumps(identity, indent=2) + "\n")

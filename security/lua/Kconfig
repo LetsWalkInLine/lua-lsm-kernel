@@ -34,13 +34,6 @@ config SECURITY_LUA_LSM_KUNIT_TEST
 	  Test hook error propagation, return mapping, VM recovery and
 	  allocation failures using the production Lua-LSM dispatchers.
 
-config SECURITY_LUA_LSM_BENCHMARK
-	bool "Lua-LSM execution budget benchmark"
-	depends on SECURITY_LUA_LSM=y && KUNIT=y
-	default n
-	help
-	  Explicit performance experiment; excluded from functional regression.
-
 config SECURITY_LUA_LSM_TEST_PROBE
 	bool "Lua-LSM receive selftest observer"
 	depends on SECURITY_LUA_LSM=y && KPROBES && SECURITY_NETWORK

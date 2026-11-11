@@ -93,8 +93,13 @@ asserts exact VM ownership and state restoration.
 
 KUnit tests live with their implementation: `lib/lua/tests/` uses a private
 instrumented copy of the string library, and `security/lua/*kunit.c` exercises
-production dispatchers and private budget-clock/converter copies. No production
-observer is added. KUnit must also run under the host watchdog: several cases
+production dispatchers and a private budget-clock instance. Output ownership
+tests invoke the real inode_getsecurity converter. Three internal boundaries
+(output duplication, output discard, and module debug-hook cleanup) support
+KUnit static stubs, scoped to the current test and automatically released with
+its resources. Disabling SECURITY_LUA_LSM_KUNIT_TEST maps these operations
+directly to the original calls. The string and clock source inclusions remain.
+KUnit must also run under the host watchdog: several cases
 intentionally loop forever unless the deadline implementation works.
 
 Host packaging regressions can be checked without a kernel or QEMU:
@@ -106,21 +111,17 @@ in an installed copy).
 Add deterministic accounting/boundary assertions to the appropriate KUnit case
 list, then update expected suite counts in `check_log`. For an end-to-end case,
 add a bounded input policy and exact result assertions to the relevant C probe;
-check recovery immediately afterwards. Share helpers instead of duplicating
+check recovery immediately afterwards. Prefer existing resource and lifecycle
+boundaries for injection; a new case does not automatically warrant a new
+production stub. Keep replacements local to the test and preserve the real
+implementation as the default. Share helpers instead of duplicating
 mount, unload or errno handling. Add a distinct guest marker only after all its
 assertions pass and require it in `check_log`. A new guest mode also needs a TAP
 plan entry in `regression.sh`. Preserve a negative check: missing markers,
 nonzero exit, diagnostics and duplicate/incomplete plans must not report success.
 
-## Separate benchmark entry
-
-Functional regression disables `CONFIG_SECURITY_LUA_LSM_BENCHMARK`. The existing
-experimental `vm_budget_bench.c` has its own off-by-default config and explicit
-`benchmark.sh --kernel ... --busybox ... --output NEW_DIR` entry. Enable that
-config and rebuild before using it. It is not part of the TAP regression or a
-final performance report. Functional deadline tests keep termination assertions
-without collecting the old 32-sample latency series. TCG timings do not establish
-native overhead or latency percentiles.
+Performance measurement and benchmark-specific entry points are deferred to a
+separate delivery. Timing here is used to assert deadline correctness.
 
 The deadline is cooperative: C-only regions can return after the deadline.
 These tests do not establish hard wall-time or arbitrary helper resource bounds.
