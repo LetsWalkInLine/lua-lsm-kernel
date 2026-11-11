@@ -9,6 +9,7 @@
 #define _SECURITY_LUA_LSM_LSM_DEFS_H
 
 #include "lsm.h"
+#include "lsm_test.h"
 #include "lua_object.h"
 #include <linux/lualib.h>
 #include <linux/slab.h>
@@ -279,7 +280,7 @@ static inline int lua_lsm_dispatch(lua_State *L, lua_CFunction dispatch,
 	do {									\
 		if ((args).alloc) {						\
 			if ((err) || (args).ret < 0)				\
-				kfree(security_value);				\
+				lua_lsm_security_free(security_value);				\
 			else							\
 				*security_buffer = security_value;			\
 		}								\
@@ -377,7 +378,7 @@ static inline bool lua_lsm_hook_has_inactive_cleanup(unsigned int nr)
 				return luaL_error(L, "hook '%s' is not a function", #NAME);\
 			}								\
 			/* No debug callback may outlive its module deadline. */	\
-			lua_resetdebughook(L);					\
+			lua_lsm_module_resetdebughook(L);					\
 			/* Keep the deadline active through C return and GC. */	\
 			lua_pop(L, 1);			/* pop _M */			\
 			RET_CHECK_ ## pcalltype(NAME, ret);				\

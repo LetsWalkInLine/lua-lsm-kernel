@@ -34,6 +34,29 @@
 #include "lua_mm.h"
 #include "lsm_defs.h"
 
+#ifdef CONFIG_SECURITY_LUA_LSM_KUNIT_TEST
+#include <kunit/static_stub.h>
+
+void *lua_lsm_security_memdup(const void *src, size_t size, gfp_t flags)
+{
+	KUNIT_STATIC_STUB_REDIRECT(lua_lsm_security_memdup, src, size, flags);
+	return kmemdup(src, size, flags);
+}
+
+void lua_lsm_security_free(const void *ptr)
+{
+	KUNIT_STATIC_STUB_REDIRECT(lua_lsm_security_free, ptr);
+	kfree(ptr);
+}
+
+void lua_lsm_module_resetdebughook(lua_State *L)
+{
+	KUNIT_STATIC_STUB_REDIRECT(lua_lsm_module_resetdebughook, L);
+	lua_resetdebughook(L);
+}
+#endif
+
+
 
 /* LSM_RET_DEFAULT */
 #define DECLARE_LSM_RET_DEFAULT_void(DEFAULT, NAME)             \
@@ -1352,7 +1375,7 @@ LUA_LSM_INT_GETSECURITY_DEFINE5(inode_getsecurity, struct mnt_idmap *, idmap,
 			const char *v = lua_tolstring(L, top, &len);
 			ret = (int)len;
 			if (alloc) {
-				*buffer = kmemdup(v, len, GFP_NOFS);
+				*buffer = lua_lsm_security_memdup(v, len, GFP_NOFS);
 				if (*buffer == NULL)
 					ret = -ENOMEM;
 			}
