@@ -1,4 +1,5 @@
 #!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-only
 . /common.sh
 echo x > /strings-ok
 mkdir -p /run

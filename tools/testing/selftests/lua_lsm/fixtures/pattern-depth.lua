@@ -1,3 +1,4 @@
+-- SPDX-License-Identifier: GPL-2.0-only
 local errno = require('errno')
 local p64 = string.rep('a*', 64)
 local p65 = string.rep('a*', 65)

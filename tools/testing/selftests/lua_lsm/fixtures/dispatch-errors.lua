@@ -1,3 +1,4 @@
+-- SPDX-License-Identifier: GPL-2.0-only
 local M = {name='dispatch_errors',author='Lua-LSM tests',
  description='Uncaught error propagation and same-task recovery',license='GPL-2.0',version=1}
 M.file_open=function(file)

@@ -1,27 +1,30 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /* Production VM and dispatchers. Dangerous programs run only in watchdog guests. */
 #include <kunit/test.h>
-#include "tests/test-common.h"
+#include "test_common.h"
 #include <linux/delay.h>
 #include <linux/interrupt.h>
 #include <linux/completion.h>
 #include <linux/lauxlib.h>
 #include <linux/lualib.h>
-#include "lsm.h"
-#include "lsm_defs.h"
-#include "../../lib/lua/ldo.h"
+#include "../lsm.h"
+#include "../lsm_defs.h"
+#include "../../../lib/lua/ldo.h"
 
 #define META "author='tests',description='budget',license='GPL-2.0',version=1,"
 
-static void register_code(struct kunit *test, const char *prefix, const char *body)
+static void register_code(struct kunit *test, const char *prefix,
+			  const char *body)
 {
 	char *code = kunit_kmalloc(test, 8192, GFP_KERNEL);
 
 	KUNIT_ASSERT_NOT_NULL(test, code);
-	snprintf(code, 8192, "%s local M={name='budget_first'," META "hit=0};"
-		"local function f() M.hit=M.hit+1;%s end;"
-		"M.file_open=f;M.inode_xattr_skipcap=f;M.ismaclabel=f;"
-		"M.inode_need_killpriv=f;M.inode_post_setxattr=f;return M\n", prefix, body);
+	snprintf(code, 8192,
+		 "%s local M={name='budget_first'," META "hit=0};"
+		 "local function f() M.hit=M.hit+1;%s end;"
+		 "M.file_open=f;M.inode_xattr_skipcap=f;M.ismaclabel=f;"
+		 "M.inode_need_killpriv=f;M.inode_post_setxattr=f;return M\n",
+		 prefix, body);
 	KUNIT_ASSERT_EQ(test, lua_lsm_module_register(code, strlen(code)), 0);
 }
 
@@ -46,7 +49,8 @@ static void clean_state(struct kunit *test)
 	KUNIT_EXPECT_FALSE(test, lua_toboolean(L, -1));
 	lua_pop(L, 1);
 	lvm_put(L);
-	KUNIT_EXPECT_EQ(test, atomic_read(&lua_lsm_task(current)->lvm->refcount), 0);
+	KUNIT_EXPECT_EQ(test,
+			atomic_read(&lua_lsm_task(current)->lvm->refcount), 0);
 }
 
 static void reliable_termination(struct kunit *test)
@@ -86,24 +90,34 @@ static void reliable_termination(struct kunit *test)
 		/* The first call times out; shared module state makes the next succeed. */
 		{
 			char *body = kunit_kmalloc(test, 4096, GFP_KERNEL);
+
 			KUNIT_ASSERT_NOT_NULL(test, body);
-			snprintf(body, 4096, "if M.hit>1 then assert(not M.escaped);return true end;%s", programs[i]);
+			snprintf(
+				body, 4096,
+				"if M.hit>1 then assert(not M.escaped);return true end;%s",
+				programs[i]);
 			register_code(test, "", body);
 		}
 		start = ktime_get_ns();
-		KUNIT_EXPECT_EQ_MSG(test, lua_lsm_file_open(NULL), -EIO, "program %d", i);
+		KUNIT_EXPECT_EQ_MSG(test, lua_lsm_file_open(NULL), -EIO,
+				    "program %d", i);
 		elapsed = ktime_get_ns() - start;
-		KUNIT_EXPECT_GE_MSG(test, elapsed, lua_lsm_budget_ns(), "early ordinary error %d", i);
-		kunit_info(test, "timeout program=%d elapsed_ns=%llu\n", i, elapsed);
+		KUNIT_EXPECT_GE_MSG(test, elapsed, lua_lsm_budget_ns(),
+				    "early ordinary error %d", i);
+		kunit_info(test, "timeout program=%d elapsed_ns=%llu\n", i,
+			   elapsed);
 		clean_state(test);
-		KUNIT_EXPECT_EQ_MSG(test, lua_lsm_file_open(NULL), 0, "reuse %d", i);
+		KUNIT_EXPECT_EQ_MSG(test, lua_lsm_file_open(NULL), 0,
+				    "reuse %d", i);
 		/* Read without invoking a module metatable. */
 		L = lvm_get();
-		KUNIT_EXPECT_PTR_EQ(test, lua_topointer(L, LUA_GLOBALSINDEX), globals);
+		KUNIT_EXPECT_PTR_EQ(test, lua_topointer(L, LUA_GLOBALSINDEX),
+				    globals);
 		lua_getfield(L, LUA_REGISTRYINDEX, "_MODULES");
 		lua_getfield(L, -1, "budget_first");
 		lua_getfield(L, -1, "escaped");
-		KUNIT_EXPECT_FALSE_MSG(test, lua_toboolean(L, -1), "escaped %d", i);
+		KUNIT_EXPECT_FALSE_MSG(test, lua_toboolean(L, -1), "escaped %d",
+				       i);
 		lua_settop(L, 0);
 		lvm_put(L);
 		remove_policy(test);
@@ -112,7 +126,8 @@ static void reliable_termination(struct kunit *test)
 
 static void lazy_lookup_and_categories(struct kunit *test)
 {
-	static const char second[] = "return {name='budget_second'," META
+	static const char second[] =
+		"return {name='budget_second'," META
 		"file_open=function()error('later module ran')end}\n";
 	static const char *const prefix[] = {
 		"if current then while true do end end;",
@@ -131,7 +146,8 @@ static void lazy_lookup_and_categories(struct kunit *test)
 		remove_policy(test);
 	}
 	register_code(test, "", "while true do end");
-	KUNIT_ASSERT_EQ(test, lua_lsm_module_register(second, sizeof(second)-1), 0);
+	KUNIT_ASSERT_EQ(test,
+			lua_lsm_module_register(second, sizeof(second) - 1), 0);
 	KUNIT_EXPECT_EQ(test, lua_lsm_file_open(NULL), -EIO);
 	KUNIT_EXPECT_EQ(test, lua_lsm_inode_need_killpriv(NULL), -EIO);
 	KUNIT_EXPECT_EQ(test, lua_lsm_inode_xattr_skipcap("x"), 0);
@@ -169,6 +185,7 @@ static int observe(lua_State *L)
 static int spend(lua_State *L)
 {
 	u64 until = ktime_get_ns() + lua_lsm_budget_ns() * 3 / 5;
+
 	while ((s64)(ktime_get_ns() - until) < 0)
 		cpu_relax();
 	return 0;
@@ -177,6 +194,7 @@ static int spend(lua_State *L)
 static void set_helper(lua_CFunction fn)
 {
 	lua_State *L = lvm_get();
+
 	if (fn)
 		lua_pushcfunction(L, fn);
 	else
@@ -197,12 +215,14 @@ static void shared_deadline_and_c_return(struct kunit *test)
 	int i;
 
 	set_helper(overrun);
-	for (i=0; i<ARRAY_SIZE(bodies); i++) {
+	for (i = 0; i < ARRAY_SIZE(bodies); i++) {
 		lua_State *L;
+
 		register_code(test, "", bodies[i]);
 		overrun_calls = 0;
 		KUNIT_EXPECT_EQ(test, lua_lsm_file_open(NULL), -EIO);
-		KUNIT_EXPECT_EQ_MSG(test, overrun_calls, 1U, "helper invocation %d", i);
+		KUNIT_EXPECT_EQ_MSG(test, overrun_calls, 1U,
+				    "helper invocation %d", i);
 		L = lvm_get();
 		lua_getfield(L, LUA_REGISTRYINDEX, "_MODULES");
 		lua_getfield(L, -1, "budget_first");
@@ -215,19 +235,25 @@ static void shared_deadline_and_c_return(struct kunit *test)
 	}
 	set_helper(spend);
 	/* Loader and callback each fit, but together exceed the same deadline. */
-	register_code(test, "if current then budget_helper()end;", "budget_helper();return true");
+	register_code(test, "if current then budget_helper()end;",
+		      "budget_helper();return true");
 	KUNIT_EXPECT_EQ(test, lua_lsm_file_open(NULL), -EIO);
-	KUNIT_EXPECT_EQ(test, lua_lsm_file_open(NULL), 0); /* already loaded: one spend */
+	KUNIT_EXPECT_EQ(test, lua_lsm_file_open(NULL),
+			0); /* already loaded: one spend */
 	clean_state(test);
 	remove_policy(test);
 	/* Two modules each receive a fresh budget, rather than sharing the hook total. */
 	register_code(test, "", "budget_helper();return true");
 	{
-		static const char second[] = "return {name='budget_second'," META
+		static const char second[] =
+			"return {name='budget_second'," META
 			"file_open=function()budget_helper();return true end}\n";
-		KUNIT_ASSERT_EQ(test, lua_lsm_module_register(second, sizeof(second)-1), 0);
+		KUNIT_ASSERT_EQ(
+			test,
+			lua_lsm_module_register(second, sizeof(second) - 1), 0);
 		KUNIT_EXPECT_EQ(test, lua_lsm_file_open(NULL), 0);
-		KUNIT_ASSERT_EQ(test, lua_lsm_module_unregister("budget_second"), 0);
+		KUNIT_ASSERT_EQ(test,
+				lua_lsm_module_unregister("budget_second"), 0);
 	}
 	remove_policy(test);
 	set_helper(NULL);
@@ -310,6 +336,7 @@ static void atomic_callback(struct tasklet_struct *t)
 {
 	struct softirq_check *s = from_tasklet(s, t, tasklet);
 	lua_State *L = lvm_get();
+
 	lua_pushcfunction(L, observe);
 	lua_setglobal(L, "budget_helper");
 	lvm_put(L);
@@ -350,7 +377,8 @@ static void contexts(struct kunit *test)
 	init_completion(&s.done);
 	tasklet_setup(&s.tasklet, atomic_callback);
 	tasklet_schedule(&s.tasklet);
-	KUNIT_ASSERT_NE(test, wait_for_completion_timeout(&s.done, 10 * HZ), 0UL);
+	KUNIT_ASSERT_NE(test, wait_for_completion_timeout(&s.done, 10 * HZ),
+			0UL);
 	tasklet_kill(&s.tasklet);
 	KUNIT_EXPECT_EQ(test, s.result, 0);
 	KUNIT_EXPECT_LE(test, s.budget, LUA_LSM_BUDGET_ATOMIC_NS);
@@ -363,7 +391,8 @@ static void contexts(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, result, -EIO);
 	init_completion(&s.done);
 	tasklet_schedule(&s.tasklet);
-	KUNIT_ASSERT_NE(test, wait_for_completion_timeout(&s.done, 10 * HZ), 0UL);
+	KUNIT_ASSERT_NE(test, wait_for_completion_timeout(&s.done, 10 * HZ),
+			0UL);
 	tasklet_kill(&s.tasklet);
 	KUNIT_EXPECT_EQ(test, s.result, -EIO);
 	clean_state(test);
@@ -383,6 +412,7 @@ static int checkpoint_run(lua_State *L)
 	lua_settop(L, 0);
 	{
 		int status = luaL_loadstring(L, "while true do end\n");
+
 		if (status)
 			return lua_rethrow(L, status);
 	}
@@ -395,9 +425,11 @@ static void independent_checkpoint(struct kunit *test)
 {
 	lua_State *L = lvm_get();
 	int status;
+
 	instructions = 0;
 	status = lua_cpcall(L, checkpoint_run, NULL);
-	KUNIT_EXPECT_EQ_MSG(test, status, LUA_ERRTIME, "error: %s", lua_tostring(L, -1));
+	KUNIT_EXPECT_EQ_MSG(test, status, LUA_ERRTIME, "error: %s",
+			    lua_tostring(L, -1));
 	KUNIT_EXPECT_EQ(test, instructions, LUA_BUDGET_INTERVAL - 1);
 	KUNIT_EXPECT_EQ(test, lua_budget_end(L), LUA_ERRTIME);
 	lua_sethook(L, NULL, 0, 0);
@@ -409,6 +441,7 @@ static void independent_checkpoint(struct kunit *test)
 static int short_return(lua_State *L)
 {
 	int status;
+
 	lua_settop(L, 0);
 	status = luaL_loadstring(L, "return true\n");
 	if (status)
@@ -421,6 +454,7 @@ static int short_return(lua_State *L)
 static void exit_before_interval(struct kunit *test)
 {
 	lua_State *L = lvm_get();
+
 	instructions = 0;
 	KUNIT_EXPECT_EQ(test, lua_cpcall(L, short_return, NULL), LUA_ERRTIME);
 	KUNIT_EXPECT_LT(test, instructions, LUA_BUDGET_INTERVAL);
@@ -449,6 +483,7 @@ static void deadline_expiry(struct kunit *test)
 	{
 		u64 start = ktime_get_ns(), elapsed;
 		int status = lua_cpcall(L, expiry_run, NULL);
+
 		elapsed = ktime_get_ns() - start;
 		KUNIT_EXPECT_EQ(test, status, LUA_ERRTIME);
 		KUNIT_EXPECT_EQ(test, lua_budget_end(L), LUA_ERRTIME);
@@ -463,16 +498,20 @@ static void deadline_expiry(struct kunit *test)
 
 static void postpone_after_timeout(struct kunit *test)
 {
-	static const char policy[] = "return {name='budget_first'," META
+	static const char policy[] =
+		"return {name='budget_first'," META
 		"file_free_security=function(file)file.marker=42;while true do end end}\n";
 	struct file *file = kunit_kzalloc(test, sizeof(*file), GFP_KERNEL);
 	struct lua_lsm_object *object;
 
 	KUNIT_ASSERT_NOT_NULL(test, file);
-	file->f_security = kunit_kzalloc(test, lua_lsm_blob_sizes.lbs_file + sizeof(*object), GFP_KERNEL);
+	file->f_security = kunit_kzalloc(
+		test, lua_lsm_blob_sizes.lbs_file + sizeof(*object),
+		GFP_KERNEL);
 	KUNIT_ASSERT_NOT_NULL(test, file->f_security);
 	object = lua_lsm_file(file);
-	KUNIT_ASSERT_EQ(test, lua_lsm_module_register(policy, sizeof(policy)-1), 0);
+	KUNIT_ASSERT_EQ(test,
+			lua_lsm_module_register(policy, sizeof(policy) - 1), 0);
 	lua_lsm_file_free_security(file);
 	KUNIT_EXPECT_EQ(test, atomic_read(&object->dict.count), 0);
 	clean_state(test);
@@ -492,6 +531,10 @@ static struct kunit_case cases[] = {
 	KUNIT_CASE(postpone_after_timeout),
 	{}
 };
-static struct kunit_suite suite = {.name="lua-lsm-vm-budget", .init=lua_lsm_test_init, .test_cases=cases};
+static struct kunit_suite suite = {
+	.name = "lua_lsm_vm_budget",
+	.init = lua_lsm_test_init,
+	.test_cases = cases,
+};
 kunit_test_suite(suite);
 MODULE_LICENSE("GPL");

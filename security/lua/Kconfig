@@ -31,8 +31,11 @@ config SECURITY_LUA_LSM_KUNIT_TEST
 	depends on SECURITY_LUA_LSM=y && KUNIT=y && AUDIT
 	default n
 	help
-	  Test hook error propagation, return mapping, VM recovery and
-	  allocation failures using the production Lua-LSM dispatchers.
+	  Use KUnit to test hook errors, VM budgets, recovery and allocation
+	  failures through production Lua-LSM dispatchers. These tests are
+	  built-in and deliberately opt-in, including with KUNIT_ALL_TESTS:
+	  run them in a disposable guest with a host watchdog, as broken
+	  deadline handling can otherwise hang the kernel.
 
 config SECURITY_LUA_LSM_TEST_PROBE
 	bool "Lua-LSM receive selftest observer"

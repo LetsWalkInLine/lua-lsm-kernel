@@ -1,22 +1,24 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /* Exercise production dispatchers; all injection stays in this test object. */
 #include <kunit/test.h>
-#include "tests/test-common.h"
+#include "test_common.h"
 #include <linux/completion.h>
 #include <linux/interrupt.h>
 #include <linux/lauxlib.h>
 #include <linux/lualib.h>
 #include <linux/mm.h>
 #include <linux/xattr.h>
-#include "lsm.h"
-#include "lsm_defs.h"
-#include "lua_object.h"
+#include "../lsm.h"
+#include "../lsm_defs.h"
+#include "../lua_object.h"
 
-#define META "author='tests',description='dispatch errors',license='GPL-2.0',version=1,"
-#define HOOKS "M.file_open=f;M.inode_xattr_skipcap=f;M.ismaclabel=f;" \
+#define META \
+	"author='tests',description='dispatch errors',license='GPL-2.0',version=1,"
+#define HOOKS                                                                \
+	"M.file_open=f;M.inode_xattr_skipcap=f;M.ismaclabel=f;"              \
 	"M.audit_rule_known=f;M.inode_need_killpriv=f;M.audit_rule_match=f;" \
-	"M.capget=f;M.inode_init_security=f;M.inode_getsecurity=f;" \
-	"M.inode_listsecurity=f;M.inode_post_setxattr=f;" \
+	"M.capget=f;M.inode_init_security=f;M.inode_getsecurity=f;"          \
+	"M.inode_listsecurity=f;M.inode_post_setxattr=f;"                    \
 	"M.vm_enough_memory=f;M.task_prctl=f;M.fs_context_parse_param=f;M.file_mprotect=f;"
 
 static void register_body(struct kunit *test, const char *body)
@@ -25,8 +27,10 @@ static void register_body(struct kunit *test, const char *body)
 
 	KUNIT_ASSERT_NOT_NULL(test, code);
 	snprintf(code, 4096,
-		"local M={name='dispatch_first'," META "hit=0};"
-		"local function f(...) M.hit=M.hit+1;%s end;" HOOKS "return M\n", body);
+		 "local M={name='dispatch_first'," META "hit=0};"
+		 "local function f(...) M.hit=M.hit+1;%s end;" HOOKS
+		 "return M\n",
+		 body);
 
 	KUNIT_ASSERT_NOT_NULL(test, code);
 	KUNIT_ASSERT_EQ(test, lua_lsm_module_register(code, strlen(code)), 0);
@@ -55,9 +59,11 @@ static struct snapshot snapshot(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, lua_type(L, -1), LUA_TBOOLEAN);
 	KUNIT_EXPECT_EQ(test, lua_toboolean(L, -1), 0);
 	lua_pop(L, 1);
-	KUNIT_EXPECT_EQ(test, atomic_read(&lua_lsm_task(current)->lvm->refcount), 1);
+	KUNIT_EXPECT_EQ(test,
+			atomic_read(&lua_lsm_task(current)->lvm->refcount), 1);
 	lvm_put(L);
-	KUNIT_EXPECT_EQ(test, atomic_read(&lua_lsm_task(current)->lvm->refcount), 0);
+	KUNIT_EXPECT_EQ(test,
+			atomic_read(&lua_lsm_task(current)->lvm->refcount), 0);
 	return s;
 }
 
@@ -79,8 +85,10 @@ static void unregister_first(struct kunit *test)
 
 static void errno_errors(struct kunit *test)
 {
-	const char *bodies[] = {
-		"error('ordinary')", "error({})", "error(42)",
+	static const char * const bodies[] = {
+		"error('ordinary')",
+		"error({})",
+		"error(42)",
 		"string.byte({})",
 		"debug.traceback=function() error('handler') end;error('original')",
 	};
@@ -101,7 +109,8 @@ static void categories_and_stop_once(struct kunit *test, const char *body)
 {
 	static const char second[] =
 		"local M={name='dispatch_second'," META "hit=0};"
-		"local function f() M.hit=M.hit+1;return true end;" HOOKS "return M\n";
+		"local function f() M.hit=M.hit+1;return true end;" HOOKS
+		"return M\n";
 	struct snapshot before = snapshot(test);
 	kernel_cap_t e = CAP_EMPTY_SET, i = e, p = e;
 	char *buffer = NULL;
@@ -110,7 +119,8 @@ static void categories_and_stop_once(struct kunit *test, const char *body)
 	lua_State *L;
 
 	register_body(test, body);
-	KUNIT_ASSERT_EQ(test, lua_lsm_module_register(second, sizeof(second) - 1), 0);
+	KUNIT_ASSERT_EQ(test,
+			lua_lsm_module_register(second, sizeof(second) - 1), 0);
 	KUNIT_EXPECT_EQ(test, lua_lsm_file_open(NULL), -EIO);
 	KUNIT_EXPECT_EQ(test, lua_lsm_vm_enough_memory(NULL, 1), -EIO);
 	KUNIT_EXPECT_EQ(test, lua_lsm_task_prctl(0, 0, 0, 0, 0), -EIO);
@@ -121,9 +131,17 @@ static void categories_and_stop_once(struct kunit *test, const char *body)
 	KUNIT_EXPECT_EQ(test, lua_lsm_inode_need_killpriv(NULL), -EIO);
 	KUNIT_EXPECT_EQ(test, lua_lsm_audit_rule_match(NULL, 0, 0, NULL), -EIO);
 	KUNIT_EXPECT_EQ(test, lua_lsm_capget(current, &e, &i, &p), -EIO);
-	KUNIT_EXPECT_EQ(test, lua_lsm_inode_init_security(NULL, NULL, NULL, NULL, &count), -EIO);
-	KUNIT_EXPECT_EQ(test, lua_lsm_inode_getsecurity(NULL, NULL, "x", (void **)&buffer, true), -EIO);
-	KUNIT_EXPECT_EQ(test, lua_lsm_inode_listsecurity(NULL, &buffer, &remaining), -EIO);
+	KUNIT_EXPECT_EQ(test,
+			lua_lsm_inode_init_security(NULL, NULL, NULL, NULL,
+						    &count),
+			-EIO);
+	KUNIT_EXPECT_EQ(test,
+			lua_lsm_inode_getsecurity(NULL, NULL, "x",
+						  (void **)&buffer, true),
+			-EIO);
+	KUNIT_EXPECT_EQ(test,
+			lua_lsm_inode_listsecurity(NULL, &buffer, &remaining),
+			-EIO);
 	lua_lsm_inode_post_setxattr(NULL, "x", "v", 1, 0);
 	KUNIT_EXPECT_PTR_EQ(test, buffer, NULL);
 	KUNIT_EXPECT_EQ(test, remaining, (ssize_t)99);
@@ -149,7 +167,7 @@ static void categories_and_stop(struct kunit *test)
 
 static void lazy_and_lookup_errors(struct kunit *test)
 {
-	const char *stages[] = {
+	static const char * const stages[] = {
 		"if current then error('load') end;",
 		"if current then string.byte({}) end;",
 		"if current then return 42 end;",
@@ -168,9 +186,12 @@ static void lazy_and_lookup_errors(struct kunit *test)
 
 		KUNIT_ASSERT_NOT_NULL(test, code);
 		snprintf(code, 4096,
-			"%s return {name='dispatch_first'," META "file_open=function()return true end}\n", stages[i]);
+			 "%s return {name='dispatch_first'," META
+			 "file_open=function()return true end}\n",
+			 stages[i]);
 		KUNIT_ASSERT_NOT_NULL(test, code);
-		KUNIT_ASSERT_EQ(test, lua_lsm_module_register(code, strlen(code)), 0);
+		KUNIT_ASSERT_EQ(test,
+				lua_lsm_module_register(code, strlen(code)), 0);
 		KUNIT_EXPECT_EQ(test, lua_lsm_file_open(NULL), -EIO);
 		KUNIT_EXPECT_EQ(test, lua_lsm_file_open(NULL), -EIO);
 		check_state(test, before);
@@ -189,23 +210,30 @@ static void environment_and_reuse(struct kunit *test)
 	struct lua_lsm_object *object;
 	lua_State *L;
 
-	register_body(test, "if M.hit==1 then setfenv(0,{});error({}) end;return true");
+	register_body(
+		test,
+		"if M.hit==1 then setfenv(0,{});error({}) end;return true");
 	KUNIT_EXPECT_EQ(test, lua_lsm_file_open(NULL), -EIO);
 	check_state(test, before);
 	KUNIT_EXPECT_EQ(test, lua_lsm_file_open(NULL), 0);
 	unregister_first(test);
-	register_body(test, "if M.hit==1 then debug.sethook(function()error({})end,'',1) end;assert(debug.gethook()==nil);return true");
+	register_body(
+		test,
+		"if M.hit==1 then debug.sethook(function()error({})end,'',1) end;assert(debug.gethook()==nil);return true");
 	KUNIT_EXPECT_EQ(test, lua_lsm_file_open(NULL), -EIO);
 	check_state(test, before);
 	KUNIT_EXPECT_EQ(test, lua_lsm_file_open(NULL), 0);
 	unregister_first(test);
 	KUNIT_ASSERT_NOT_NULL(test, file);
-	file->f_security = kunit_kzalloc(test, lua_lsm_blob_sizes.lbs_file +
-					   sizeof(*object), GFP_KERNEL);
+	file->f_security = kunit_kzalloc(
+		test, lua_lsm_blob_sizes.lbs_file + sizeof(*object),
+		GFP_KERNEL);
 	KUNIT_ASSERT_NOT_NULL(test, file->f_security);
 	object = lua_lsm_file(file);
-	KUNIT_ASSERT_EQ(test, lua_lsm_module_register(cleanup_policy,
-						   sizeof(cleanup_policy) - 1), 0);
+	KUNIT_ASSERT_EQ(test,
+			lua_lsm_module_register(cleanup_policy,
+						sizeof(cleanup_policy) - 1),
+			0);
 	lua_lsm_file_free_security(file);
 	/* __postpone must free a node created just before the Lua error. */
 	KUNIT_EXPECT_EQ(test, atomic_read(&object->dict.count), 0);
@@ -225,7 +253,9 @@ static void caught_and_valid_results(struct kunit *test)
 	struct snapshot before = snapshot(test);
 	struct vm_area_struct vma = {};
 
-	register_body(test, "local ok=pcall(string.byte,{});assert(not ok);"
+	register_body(
+		test,
+		"local ok=pcall(string.byte,{});assert(not ok);"
 		"ok=xpcall(function()error({})end,function(e)return e end);assert(not ok);"
 		"local co=coroutine.create(function()error({})end);ok=coroutine.resume(co);"
 		"assert(not ok);return true");
@@ -237,13 +267,18 @@ static void caught_and_valid_results(struct kunit *test)
 	unregister_first(test);
 	register_body(test, "return nil");
 	KUNIT_EXPECT_EQ(test, lua_lsm_file_open(NULL), 0);
-	KUNIT_EXPECT_EQ(test, lua_lsm_inode_getsecurity(NULL, NULL, "x", NULL, false), -EOPNOTSUPP);
+	KUNIT_EXPECT_EQ(test,
+			lua_lsm_inode_getsecurity(NULL, NULL, "x", NULL, false),
+			-EOPNOTSUPP);
 	unregister_first(test);
 	register_body(test, "return 'value'");
-	KUNIT_EXPECT_EQ(test, lua_lsm_inode_getsecurity(NULL, NULL, "x", NULL, false), 5);
+	KUNIT_EXPECT_EQ(test,
+			lua_lsm_inode_getsecurity(NULL, NULL, "x", NULL, false),
+			5);
 	unregister_first(test);
-	register_body(test, "local v=...;assert(v:start()==0);"
-		"assert(debug.getfenv(v).current==current);return true");
+	register_body(test,
+		      "local v=...;assert(v:start()==0);"
+		      "assert(debug.getfenv(v).current==current);return true");
 	KUNIT_EXPECT_EQ(test, lua_lsm_file_mprotect(&vma, 0, 0), 0);
 	unregister_first(test);
 	check_state(test, before);
@@ -270,7 +305,9 @@ static void allocation_failures(struct kunit *test)
 	struct snapshot before = snapshot(test);
 	int n, failures = 0;
 
-	register_body(test, "assert(debug.gethook()==nil);debug.sethook(function()end,'',100);"
+	register_body(
+		test,
+		"assert(debug.gethook()==nil);debug.sethook(function()end,'',100);"
 		"local t={};for i=1,32 do t[i]=tostring(i)..'oom' end;return true");
 	for (n = 1; n <= 48; n++) {
 		struct failing_alloc a = { .remaining = n };
@@ -294,7 +331,9 @@ static void allocation_failures(struct kunit *test)
 		KUNIT_EXPECT_EQ(test, lua_lsm_file_open(NULL), 0);
 	}
 	KUNIT_EXPECT_GT(test, failures, 8);
-	kunit_info(test, "persistent OOM injection: %d/48 positions failed safely\n", failures);
+	kunit_info(test,
+		   "persistent OOM injection: %d/48 positions failed safely\n",
+		   failures);
 	unregister_first(test);
 }
 
@@ -320,7 +359,8 @@ static void lazy_allocation_failures(struct kunit *test)
 		lvm_put(L);
 		if (a.failed) {
 			failures++;
-			KUNIT_EXPECT_EQ_MSG(test, ret, -ENOMEM, "loader allocation %d", n);
+			KUNIT_EXPECT_EQ_MSG(test, ret, -ENOMEM,
+					    "loader allocation %d", n);
 		} else {
 			KUNIT_EXPECT_EQ(test, ret, 0);
 		}
@@ -329,7 +369,8 @@ static void lazy_allocation_failures(struct kunit *test)
 		unregister_first(test);
 	}
 	KUNIT_EXPECT_GT(test, failures, 32);
-	kunit_info(test, "lazy OOM injection: %d/96 positions failed safely\n", failures);
+	kunit_info(test, "lazy OOM injection: %d/96 positions failed safely\n",
+		   failures);
 }
 
 struct softirq_check {
@@ -350,7 +391,8 @@ static void softirq_callback(struct tasklet_struct *t)
 	s->predicate = lua_lsm_inode_xattr_skipcap("x");
 	L = lvm_get();
 	s->top = lua_gettop(L);
-	s->restored = env == lua_topointer(L, LUA_GLOBALSINDEX) && !lua_gethook(L);
+	s->restored = env == lua_topointer(L, LUA_GLOBALSINDEX) &&
+		      !lua_gethook(L);
 	lvm_put(L);
 	complete(&s->done);
 }
@@ -361,7 +403,8 @@ static void task_atomic_and_softirq(struct kunit *test)
 	int ret;
 
 	register_body(test, "error({})");
-	KUNIT_EXPECT_EQ(test, lua_lsm_file_open(NULL), -EIO); /* Populate task VM. */
+	KUNIT_EXPECT_EQ(test, lua_lsm_file_open(NULL),
+			-EIO); /* Populate task VM. */
 	preempt_disable();
 	ret = lua_lsm_file_open(NULL);
 	preempt_enable();
@@ -370,7 +413,8 @@ static void task_atomic_and_softirq(struct kunit *test)
 	init_completion(&s.done);
 	tasklet_setup(&s.tasklet, softirq_callback);
 	tasklet_schedule(&s.tasklet);
-	KUNIT_ASSERT_NE(test, wait_for_completion_timeout(&s.done, 10 * HZ), 0UL);
+	KUNIT_ASSERT_NE(test, wait_for_completion_timeout(&s.done, 10 * HZ),
+			0UL);
 	tasklet_kill(&s.tasklet);
 	KUNIT_EXPECT_TRUE(test, s.in_softirq);
 	KUNIT_EXPECT_EQ(test, s.err, -EIO);
@@ -392,7 +436,7 @@ static struct kunit_case dispatch_cases[] = {
 	{}
 };
 static struct kunit_suite dispatch_suite = {
-	.name = "lua-lsm-dispatch-errors",
+	.name = "lua_lsm_dispatch_errors",
 	.init = lua_lsm_test_init,
 	.test_cases = dispatch_cases,
 };

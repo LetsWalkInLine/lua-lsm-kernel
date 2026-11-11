@@ -1,3 +1,4 @@
+-- SPDX-License-Identifier: GPL-2.0-only
 return {name="dump_boundary",license="GPL",file_open=function(file)
  local path=file:path()
  if path=="/dump32-source" then

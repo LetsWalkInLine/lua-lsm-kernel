@@ -41,6 +41,7 @@ tools/testing/selftests/lua_lsm/run-qemu.py --mode network \
   --busybox "$LUA_LSM_BUSYBOX" --output /tmp/lua-network-results
 ```
 
+`runner_test.py` runs host packaging regressions before the guest tests.
 `regression.sh` emits TAP and returns 0 on success, 1 on failure, or kselftest
 skip (4) if host prerequisites are missing. A booted guest missing an expected
 kernel feature fails. Each output directory must be new. `run-qemu.py` returns
@@ -91,8 +92,13 @@ optional, has no production API, and belongs only in a disposable test kernel.
 Network recovery exercises the receive path/per-CPU pool; KUnit separately
 asserts exact VM ownership and state restoration.
 
+KUnit suites use underscore-separated names, such as `lua_lsm_vm_budget` and
+`lua_string_limits`. Filters use those names (for example,
+`kunit.filter_glob=lua_lsm_*`). Return-hook, output-ownership and integration
+tests are named by function rather than their original review session.
+
 KUnit tests live with their implementation: `lib/lua/tests/` uses a private
-instrumented copy of the string library, and `security/lua/*kunit.c` exercises
+instrumented instance of the string library, and `security/lua/tests/*_kunit.c` exercises
 production dispatchers and a private budget-clock instance. Output ownership
 tests invoke the real inode_getsecurity converter. Three internal boundaries
 (output duplication, output discard, and module debug-hook cleanup) support
@@ -102,14 +108,17 @@ directly to the original calls. The string and clock source inclusions remain.
 KUnit must also run under the host watchdog: several cases
 intentionally loop forever unless the deadline implementation works.
 
-Host packaging regressions can be checked without a kernel or QEMU:
+Host packaging regressions also run automatically through kselftest. They can
+be checked without a kernel or QEMU:
 `python3 tools/testing/selftests/lua_lsm/runner_test.py` (or `python3 runner_test.py`
 in an installed copy).
 
 ## Add a case
 
 Add deterministic accounting/boundary assertions to the appropriate KUnit case
-list, then update expected suite counts in `check_log`. For an end-to-end case,
+list, then update expected suite counts in `check_log`. Use functional names
+with underscores for suites (for example, `lua_lsm_vm_budget`); place Lua-LSM
+KUnit sources under `security/lua/tests/` with a `_kunit.c` suffix. For an end-to-end case,
 add a bounded input policy and exact result assertions to the relevant C probe;
 check recovery immediately afterwards. Prefer existing resource and lifecycle
 boundaries for injection; a new case does not automatically warrant a new

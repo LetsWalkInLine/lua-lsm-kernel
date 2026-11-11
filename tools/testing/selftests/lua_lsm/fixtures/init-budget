@@ -1,4 +1,5 @@
 #!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-only
 . /common.sh
 for mode in loop pcall xpcall handler environment hook coroutine callback return ok caught deny; do
  echo test > /budget-$mode || fail "create $mode"

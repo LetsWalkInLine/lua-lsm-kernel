@@ -1,3 +1,4 @@
+-- SPDX-License-Identifier: GPL-2.0-only
 local M = {name='budget_errors',author='Lua-LSM tests',
  description='Fatal timeouts and recovery',license='GPL-2.0',version=1}
 M.file_open=function(file)

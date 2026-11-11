@@ -10,7 +10,10 @@
 
 int main(int argc, char **argv)
 {
-	const char *errors[] = {"loop", "pcall", "xpcall", "handler", "environment", "hook", "coroutine", "callback"};
+	static const char * const errors[] = {
+		"loop",	       "pcall", "xpcall",    "handler",
+		"environment", "hook",	"coroutine", "callback"
+	};
 	int round;
 	size_t i;
 
@@ -21,7 +24,8 @@ int main(int argc, char **argv)
 		if (child < 0)
 			return 1;
 		if (!child)
-			_exit(check("/budget-ok", EIO) || check("/budget-ok", EIO));
+			_exit(check("/budget-ok", EIO) ||
+			      check("/budget-ok", EIO));
 		if (waitpid(child, &status, 0) != child)
 			return 1;
 		return !WIFEXITED(status) || WEXITSTATUS(status);
@@ -36,7 +40,8 @@ int main(int argc, char **argv)
 			if (check(path, EIO) || check("/budget-ok", 0))
 				return 1;
 		}
-		if (check("/budget-return", 0) || check("/budget-caught", 0) || check("/budget-deny", EACCES))
+		if (check("/budget-return", 0) || check("/budget-caught", 0) ||
+		    check("/budget-deny", EACCES))
 			return 1;
 	}
 	return 0;

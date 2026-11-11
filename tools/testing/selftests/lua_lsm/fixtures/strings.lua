@@ -1,3 +1,4 @@
+-- SPDX-License-Identifier: GPL-2.0-only
 local M={name='strings',author='Lua-LSM tests',license='GPL-2.0',version=1,
  description='String errors remain catchable under the VM deadline'}
 local function excess()

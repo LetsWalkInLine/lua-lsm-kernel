@@ -54,7 +54,7 @@ class RunnerTest(unittest.TestCase):
                 ip.write_bytes(b"iproute2")
                 out = base / "out"
                 out.mkdir()
-                # Isolate host tools; exercise real filesystem/app-let replacement.
+                # Isolate host tools; exercise real filesystem/applet replacement.
                 def run(argv, **kwargs):
                     output = "" if argv[0] == "ldd" else b"archive"
                     return subprocess.CompletedProcess(argv, 0, output, "")

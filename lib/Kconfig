@@ -652,3 +652,7 @@ config LUA_KUNIT_TEST
 	bool "KUnit tests for the Lua string library"
 	depends on KUNIT=y && LUA=y
 	default n
+	help
+	  Use KUnit to test string work limits, matching depth and dump
+	  boundaries. Tests are built-in and deliberately opt-in. Run in a
+	  disposable guest with a host watchdog for pathological inputs.

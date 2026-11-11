@@ -1,3 +1,4 @@
+-- SPDX-License-Identifier: GPL-2.0-only
 local kernel=require('kernel')
 return {name='receive_allow',author='Lua-LSM tests',license='GPL-2.0',version=1,
  description='UDP receive allow',

@@ -12,8 +12,8 @@ static int receive_enter(struct kretprobe_instance *ri, struct pt_regs *regs)
 
 static int receive_return(struct kretprobe_instance *ri, struct pt_regs *regs)
 {
-	pr_info("LUA_RX_OBSERVER: softirq=%d ret=%d\n",
-		*(bool *)ri->data, (int)regs_return_value(regs));
+	pr_info("LUA_RX_OBSERVER: softirq=%d ret=%d\n", *(bool *)ri->data,
+		(int)regs_return_value(regs));
 	return 0;
 }
 

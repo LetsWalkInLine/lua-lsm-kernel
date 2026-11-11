@@ -14,7 +14,8 @@
 int main(int argc, char **argv)
 {
 	struct sockaddr_in addr = { .sin_family = AF_INET,
-		.sin_port = htons(19391) };
+				    .sin_port = htons(19391) };
+	struct pollfd p = { .events = POLLIN };
 	int fd, n;
 	char byte = 0;
 
@@ -27,7 +28,8 @@ int main(int argc, char **argv)
 		close(n);
 		fd = socket(AF_INET, SOCK_DGRAM, 0);
 		inet_pton(AF_INET, "192.0.2.1", &addr.sin_addr);
-		return fd < 0 || sendto(fd, "x", 1, 0, (void *)&addr, sizeof(addr)) != 1;
+		return fd < 0 ||
+		       sendto(fd, "x", 1, 0, (void *)&addr, sizeof(addr)) != 1;
 	}
 	fd = socket(AF_INET, SOCK_DGRAM, 0);
 	inet_pton(AF_INET, "192.0.2.1", &addr.sin_addr);
@@ -39,7 +41,7 @@ int main(int argc, char **argv)
 	if (n < 0)
 		return 1;
 	close(n);
-	struct pollfd p = { .fd = fd, .events = POLLIN };
+	p.fd = fd;
 	n = poll(&p, 1, 1500);
 	if (n < 0)
 		return 1;

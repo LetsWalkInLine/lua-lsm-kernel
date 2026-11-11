@@ -12,9 +12,9 @@ import subprocess
 
 
 def compile_chunk(source):
-    result = subprocess.run(['lua5.1', '-e',
-                             'io.write(string.dump(assert(loadstring(io.read("*a")))))' ],
-                            input=source.encode(), stdout=subprocess.PIPE, check=True)
+    result = subprocess.run(
+        ['lua5.1', '-e', 'io.write(string.dump(assert(loadstring(io.read("*a")))))'],
+        input=source.encode(), stdout=subprocess.PIPE, check=True)
     blob = bytearray(result.stdout)
     if blob[:12] != b'\x1bLua\x51\0\x01\x04\x08\x04\x08\0':
         raise ValueError('requires little endian x86_64 Lua 5.1 with 64-bit doubles')

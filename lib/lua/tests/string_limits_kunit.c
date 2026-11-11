@@ -163,7 +163,7 @@ static void run(struct kunit *test, const char *chunk, int expected)
 	KUNIT_ASSERT_EQ(test, status, 0);
 	status = lua_pcall(f->L, 0, LUA_MULTRET, 0);
 	KUNIT_ASSERT_EQ_MSG(test, status, expected, "%s: %s", chunk,
-			   status ? lua_tostring(f->L, -1) : "success");
+			    status ? lua_tostring(f->L, -1) : "success");
 }
 
 static struct charge_record *record(struct kunit *test, bool rejected)
@@ -174,13 +174,16 @@ static struct charge_record *record(struct kunit *test, bool rejected)
 	KUNIT_ASSERT_GT(test, f->trace.used, 0U);
 	r = &f->trace.records[f->trace.used - 1];
 	KUNIT_EXPECT_EQ(test, r->rejected, rejected);
-	KUNIT_EXPECT_EQ(test, r->total +
-		(rejected ? r->rejected_remaining : r->remaining), f->trace.limit);
+	KUNIT_EXPECT_EQ(test,
+			r->total + (rejected ? r->rejected_remaining :
+					       r->remaining),
+			f->trace.limit);
 	if (rejected) {
 		KUNIT_EXPECT_GT(test, r->rejected_cost, r->rejected_remaining);
 		KUNIT_EXPECT_EQ(test, r->remaining, 0ULL);
-		KUNIT_EXPECT_NOT_NULL(test, strstr(lua_tostring(f->L, -1),
-						       "string work limit exceeded"));
+		KUNIT_EXPECT_NOT_NULL(test,
+				      strstr(lua_tostring(f->L, -1),
+					     "string work limit exceeded"));
 	}
 	return r;
 }
@@ -228,10 +231,14 @@ static void growth_test(struct kunit *test)
 	boundary(test, "assert(string.match('a','a')=='a')", 9);
 	boundary(test, "assert(string.match('aaaa','^a?a?a?a?b')==nil)", 140);
 	boundary(test, "assert(string.match('aaaaaaaa','^(a+)%1b')==nil)", 84);
-	boundary(test, "assert(string.match('((((()))))','%b()')=='((((()))))')", 26);
-	boundary(test, "assert(string.find('aaaaaaaa','aaaaab',1,true)==nil)", 22);
+	boundary(test,
+		 "assert(string.match('((((()))))','%b()')=='((((()))))')", 26);
+	boundary(test, "assert(string.find('aaaaaaaa','aaaaab',1,true)==nil)",
+		 22);
 	boundary(test, "assert(string.find('a\\000b','\\000b',1,true)==2)", 5);
-	boundary(test, "assert(string.match('xxxxxxxxxxxxxxxx','[aaaaaaaa]z')==nil)", 398);
+	boundary(test,
+		 "assert(string.match('xxxxxxxxxxxxxxxx','[aaaaaaaa]z')==nil)",
+		 398);
 }
 
 static void precharge_test(struct kunit *test)
@@ -244,15 +251,21 @@ static void precharge_test(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, record(test, true)->rejected_cost, 4ULL);
 	boundary(test, "assert(string.gsub('abc','z','x',0)=='abc')", 4);
 	f->trace.limit = 10;
-	run(test, "hits=0; return string.gsub('a','a',function() hits=hits+1; return '12345678' end)", LUA_ERRRUN);
+	run(test,
+	    "hits=0; return string.gsub('a','a',function() hits=hits+1; return '12345678' end)",
+	    LUA_ERRRUN);
 	lua_getglobal(f->L, "hits");
 	KUNIT_EXPECT_EQ(test, lua_tointeger(f->L, -1), (lua_Integer)0);
 	f->trace.limit = 11;
-	run(test, "hits=0; return string.gsub('a','a',function() hits=hits+1; return '12345678' end)", LUA_ERRRUN);
+	run(test,
+	    "hits=0; return string.gsub('a','a',function() hits=hits+1; return '12345678' end)",
+	    LUA_ERRRUN);
 	lua_getglobal(f->L, "hits");
 	KUNIT_EXPECT_EQ(test, lua_tointeger(f->L, -1), (lua_Integer)1);
 	f->trace.limit = 9;
-	run(test, "for i=1,8 do assert(string.match('a','a')=='a') end; return string.match('aaaa','^a?a?a?a?b')", LUA_ERRRUN);
+	run(test,
+	    "for i=1,8 do assert(string.match('a','a')=='a') end; return string.match('aaaa','^a?a?a?a?b')",
+	    LUA_ERRRUN);
 	KUNIT_EXPECT_EQ(test, f->trace.used, (unsigned int)TRACE_SLOTS);
 }
 
@@ -263,9 +276,11 @@ static void depth_recovery_test(struct kunit *test)
 	run(test, "p32=string.rep('()',32); p66=string.rep('a*',65)", 0);
 	run(test, "assert(select('#',string.match('',p32))==32)", 0);
 	run(test, "return string.match('',p66)", LUA_ERRRUN);
-	KUNIT_EXPECT_NOT_NULL(test, strstr(lua_tostring(f->L, -1), "pattern recursion limit exceeded"));
+	KUNIT_EXPECT_NOT_NULL(test, strstr(lua_tostring(f->L, -1),
+					   "pattern recursion limit exceeded"));
 	run(test, "return string.match('x','[')", LUA_ERRRUN);
-	KUNIT_EXPECT_NOT_NULL(test, strstr(lua_tostring(f->L, -1), "malformed pattern"));
+	KUNIT_EXPECT_NOT_NULL(test, strstr(lua_tostring(f->L, -1),
+					   "malformed pattern"));
 	f->trace.limit = 0;
 	run(test, "return string.match({},'a')", LUA_ERRRUN);
 	KUNIT_EXPECT_EQ(test, f->trace.used, 0U);
@@ -293,7 +308,8 @@ static void iterator_reentry_test(struct kunit *test)
 	KUNIT_ASSERT_EQ(test, lua_pcall(L, 0, 1, 0), 0);
 	KUNIT_EXPECT_STREQ(test, lua_tostring(L, -1), "b");
 	f->trace.limit = DEFAULT_LIMIT;
-	run(test, "iter=string.gmatch(string.rep('a',32),string.rep('(a)',32))", 0);
+	run(test, "iter=string.gmatch(string.rep('a',32),string.rep('(a)',32))",
+	    0);
 	f->trace.limit = 323;
 	run(test, "return iter()", LUA_ERRRUN);
 	f->trace.limit = 324;
@@ -301,7 +317,9 @@ static void iterator_reentry_test(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, lua_gettop(L), 32);
 	KUNIT_EXPECT_STREQ(test, lua_tostring(L, 1), "a");
 	f->trace.limit = 32;
-	run(test, "assert(string.gsub('a','a',function(x) assert(not pcall(string.match,'aaaa','^a?a?a?a?b')); return x end)=='a')", 0);
+	run(test,
+	    "assert(string.gsub('a','a',function(x) assert(not pcall(string.match,'aaaa','^a?a?a?a?b')); return x end)=='a')",
+	    0);
 	KUNIT_ASSERT_EQ(test, f->trace.used, 2U);
 	KUNIT_EXPECT_FALSE(test, f->trace.records[0].rejected);
 	KUNIT_EXPECT_TRUE(test, f->trace.records[1].rejected);
@@ -357,7 +375,10 @@ static void byte_char_test(struct kunit *test)
 {
 	struct limit_fixture *f = test->priv;
 
-	boundary(test, "local a,b,c=string.byte('a\\000b',1,3); assert(a==97 and b==0 and c==98)", 4);
+	boundary(
+		test,
+		"local a,b,c=string.byte('a\\000b',1,3); assert(a==97 and b==0 and c==98)",
+		4);
 	boundary(test, "assert(string.byte('abc',-1)==99)", 2);
 	boundary(test, "assert(select('#',string.byte('',1))==0)", 1);
 	boundary(test, "assert(string.char(65,0,66)=='A\\000B')", 4);
@@ -366,7 +387,8 @@ static void byte_char_test(struct kunit *test)
 	set_blob(test, "large", 8001, 'a');
 	f->trace.limit = DEFAULT_LIMIT;
 	run(test, "return string.byte(large,1,8001)", LUA_ERRRUN);
-	KUNIT_EXPECT_NOT_NULL(test, strstr(lua_tostring(f->L, -1), "string slice too long"));
+	KUNIT_EXPECT_NOT_NULL(test, strstr(lua_tostring(f->L, -1),
+					   "string slice too long"));
 	run(test, "return string.char(256)", LUA_ERRRUN);
 	run(test, "assert(string.char(65)=='A')", 0);
 }
@@ -379,19 +401,25 @@ static void format_test(struct kunit *test)
 	lua_setglobal(f->L, "format_wide");
 	lua_pushinteger(f->L, -9223372036854775807LL - 1);
 	lua_setglobal(f->L, "format_min");
-	run(test, "assert(string.format('%d:%i:%x:%X:%o:%u',"
+	run(test,
+	    "assert(string.format('%d:%i:%x:%X:%o:%u',"
 	    "format_wide,format_wide,format_wide,format_wide,format_wide,format_wide)=="
-	    "'4294967297:4294967297:100000001:100000001:40000000001:4294967297')", 0);
-	run(test, "assert(string.format('%d',format_min)=='-9223372036854775808');"
+	    "'4294967297:4294967297:100000001:100000001:40000000001:4294967297')",
+	    0);
+	run(test,
+	    "assert(string.format('%d',format_min)=='-9223372036854775808');"
 	    "assert(string.format('%u',-1)=='18446744073709551615');"
-	    "assert(string.format('%d',-format_wide)=='-4294967297')", 0);
+	    "assert(string.format('%d',-format_wide)=='-4294967297')",
+	    0);
 	boundary(test, "assert(string.format('abc')=='abc')", 7);
 	boundary(test, "assert(string.format('%%')=='%')", 4);
 	boundary(test, "assert(string.format('%d',42)=='42')", 5);
 	boundary(test, "assert(string.format('%04d',42)=='0042')", 9);
 	boundary(test, "assert(string.format('%s','abc')=='abc')", 9);
-	boundary(test, "assert(string.format('%q','\\000')=='\"\\\\000\"')", 10);
-	boundary(test, "assert(string.format('%q','a\\000b')=='\"a\\\\000b\"')", 14);
+	boundary(test, "assert(string.format('%q','\\000')=='\"\\\\000\"')",
+		 10);
+	boundary(test, "assert(string.format('%q','a\\000b')=='\"a\\\\000b\"')",
+		 14);
 	boundary(test, "assert(string.format('%d','123')=='123')", 9);
 	boundary(test, "assert(string.format('')=='')", 1);
 	set_blob(test, "large", 65536, 'a');
@@ -464,7 +492,8 @@ static void dump_test(struct kunit *test)
 	Proto **links = kunit_kcalloc(test, 33, sizeof(*links), GFP_KERNEL);
 	unsigned int i;
 	/* DumpFunction: source size, eight ints, four chars; 15 writer calls. */
-	size_t proto_bytes = sizeof(size_t) + 8 * sizeof(int) + 4 * sizeof(char);
+	size_t proto_bytes =
+		sizeof(size_t) + 8 * sizeof(int) + 4 * sizeof(char);
 	size_t dump_bytes = LUAC_HEADERSIZE + 32 * proto_bytes;
 	/* Initial charge, then one unit per writer call plus its byte count. */
 	u64 cost = 1 + (LUAC_HEADERSIZE + 1) + 32 * (proto_bytes + 15);
@@ -488,7 +517,8 @@ static void dump_test(struct kunit *test)
 	p[31].sizep = 1;
 	f->trace.limit = DEFAULT_LIMIT;
 	call_dump(test, p, LUA_ERRRUN);
-	KUNIT_EXPECT_NOT_NULL(test, strstr(lua_tostring(f->L, -1), "unable to dump"));
+	KUNIT_EXPECT_NOT_NULL(test,
+			      strstr(lua_tostring(f->L, -1), "unable to dump"));
 	p[31].sizep = 0;
 	call_dump(test, p, 0);
 	p[0].sizep = 0;
@@ -496,12 +526,16 @@ static void dump_test(struct kunit *test)
 	KUNIT_ASSERT_NOT_NULL(test, p[0].code);
 	p[0].sizecode = DEFAULT_LIMIT / sizeof(Instruction);
 	call_dump(test, p, LUA_ERRRUN);
-	KUNIT_EXPECT_EQ(test, record(test, true)->rejected_cost, (u64)DEFAULT_LIMIT);
+	KUNIT_EXPECT_EQ(test, record(test, true)->rejected_cost,
+			(u64)DEFAULT_LIMIT);
 	p[0].sizecode = 0;
 	call_dump(test, p, 0);
-	run(test, "local f=function(x) return x+1 end; local b=string.dump(f); assert(loadstring(b)(41)==42)", 0);
+	run(test,
+	    "local f=function(x) return x+1 end; local b=string.dump(f); assert(loadstring(b)(41)==42)",
+	    0);
 	run(test, "return string.dump(string.len)", LUA_ERRRUN);
-	run(test, "assert(type(string.dump(function() return 1 end))=='string')", 0);
+	run(test,
+	    "assert(type(string.dump(function() return 1 end))=='string')", 0);
 }
 
 static void production_test(struct kunit *test)
@@ -523,7 +557,9 @@ static void production_test(struct kunit *test)
 	run(test, "assert(#string.lower(at_limit)==work_limit-1)", 0);
 	run(test, "return string.upper(over_limit)", LUA_ERRRUN);
 	run(test, "return string.reverse(over_limit)", LUA_ERRRUN);
-	run(test, "assert(string.rep('a',(work_limit-1)/2)==string.sub(at_limit,1,(work_limit-1)/2))", 0);
+	run(test,
+	    "assert(string.rep('a',(work_limit-1)/2)==string.sub(at_limit,1,(work_limit-1)/2))",
+	    0);
 	run(test, "return string.rep('a',work_limit/2)", LUA_ERRRUN);
 	run(test, "return string.rep('',2147483647)", LUA_ERRRUN);
 	run(test, "assert(string.format('%.1s',over_limit)=='a')", 0);
@@ -539,9 +575,14 @@ static void corpus_test(struct kunit *test)
 		const char *name, *chunk;
 		u64 cost;
 	} cases[] = {
-		{ "path-sub", "assert(string.sub('/usr/lib/modules',6,8)=='lib')", 4 },
-		{ "path-lower", "assert(string.lower('/USR/LIB/MODULES')=='/usr/lib/modules')", 17 },
-		{ "path-upper", "assert(string.upper('/usr/lib/modules')=='/USR/LIB/MODULES')", 17 },
+		{ "path-sub",
+		  "assert(string.sub('/usr/lib/modules',6,8)=='lib')", 4 },
+		{ "path-lower",
+		  "assert(string.lower('/USR/LIB/MODULES')=='/usr/lib/modules')",
+		  17 },
+		{ "path-upper",
+		  "assert(string.upper('/usr/lib/modules')=='/USR/LIB/MODULES')",
+		  17 },
 		{ "reverse-4k", "assert(#string.reverse(page)==4096)", 4097 },
 		{ "lower-4k", "assert(#string.lower(page)==4096)", 4097 },
 		{ "upper-4k", "assert(#string.upper(page)==4096)", 4097 },
@@ -549,15 +590,20 @@ static void corpus_test(struct kunit *test)
 		{ "repeat-4k", "assert(#string.rep('ab',2048)==4096)", 6145 },
 		{ "format-4k", "assert(string.format('%s',page)==page)", 8195 },
 		{ "quote-4k", "assert(#string.format('%q',page)==4098)", 8197 },
-		{ "format-precision", "assert(string.format('%.16s',page)=='aaaaaaaaaaaaaaaa')", 38 },
-		{ "numeric-format", "assert(string.format('uid=%d mode=%04x',1000,420)=='uid=1000 mode=01a4')", 35 },
+		{ "format-precision",
+		  "assert(string.format('%.16s',page)=='aaaaaaaaaaaaaaaa')",
+		  38 },
+		{ "numeric-format",
+		  "assert(string.format('uid=%d mode=%04x',1000,420)=='uid=1000 mode=01a4')",
+		  35 },
 	};
 	unsigned int i;
 
 	set_blob(test, "page", 4096, 'a');
 	for (i = 0; i < ARRAY_SIZE(cases); i++) {
 		run(test, cases[i].chunk, 0);
-		KUNIT_EXPECT_EQ_MSG(test, record(test, false)->total, cases[i].cost, "%s", cases[i].name);
+		KUNIT_EXPECT_EQ_MSG(test, record(test, false)->total,
+				    cases[i].cost, "%s", cases[i].name);
 		kunit_info(test, "STRING_CORPUS %s work=%llu", cases[i].name,
 			   record(test, false)->total);
 	}
@@ -567,8 +613,12 @@ static void corpus_test(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, record(test, false)->total, 131082ULL);
 	run(test, "assert(#string.lower(xattr_value)==65536)", 0);
 	KUNIT_EXPECT_EQ(test, record(test, false)->total, 65537ULL);
-	run(test, "path='/'..string.rep(string.rep('!',255)..'/',15)..string.rep('!',254); assert(#path==4095)", 0);
-	run(test, "local s,n=string.gsub(path,'(%W)','%%%1'); assert(n==4095 and #s==8190)", 0);
+	run(test,
+	    "path='/'..string.rep(string.rep('!',255)..'/',15)..string.rep('!',254); assert(#path==4095)",
+	    0);
+	run(test,
+	    "local s,n=string.gsub(path,'(%W)','%%%1'); assert(n==4095 and #s==8190)",
+	    0);
 	KUNIT_EXPECT_EQ(test, record(test, false)->total, 86003ULL);
 }
 
@@ -591,7 +641,7 @@ static struct kunit_case limit_cases[] = {
 };
 
 static struct kunit_suite limit_suite = {
-	.name = "lua-string-limits",
+	.name = "lua_string_limits",
 	.init = limit_init,
 	.test_cases = limit_cases,
 };

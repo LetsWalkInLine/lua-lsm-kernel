@@ -1,4 +1,5 @@
 #!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-only
 . /common.sh
 echo x > /dump32-reg-target
 cat /dump-register32.luac > /sys/kernel/security/lua/register || fail "register dump32"

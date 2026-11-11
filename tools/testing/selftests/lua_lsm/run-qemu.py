@@ -60,11 +60,11 @@ def check_log(log, mode):
         if "LUA_RX_OBSERVER: softirq=1 ret=0" not in tail:
             raise ValueError("no successful receive hook after timeout")
     elif mode == "kunit":
-        for name, count in [("lua-string-limits", 14), ("lua-lsm-dispatch-errors", 8),
-                            ("lua-lsm-vm-budget", 10), ("lua-lsm-budget-clock", 2),
-                            ("lua-lsm-budget-return-review", 3)]:
+        for name, count in [("lua_string_limits", 14), ("lua_lsm_dispatch_errors", 8),
+                            ("lua_lsm_vm_budget", 10), ("lua_lsm_vm_budget_clock", 2),
+                            ("lua_lsm_vm_budget_return", 3)]:
             required.append(f"{name}: pass:{count} fail:0 skip:0 total:{count}")
-        for name in ("lua-lsm-budget-output-review", "lua-lsm-budget-combined"):
+        for name in ("lua_lsm_getsecurity", "lua_lsm_string_budget_integration"):
             if not re.search(r"\bok \d+ " + name + r"\s*$", log, re.M):
                 raise ValueError("missing successful suite " + name)
     if mode in ("strings", "dump32", "network"):
