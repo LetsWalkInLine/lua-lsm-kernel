@@ -133,7 +133,7 @@ static u64 rec_raw[EXP_RECOVERY];
 static void print_raw(struct kunit *test, const char *tag, const u64 *vals,
 		      unsigned int n)
 {
-	char line[3 * RAW_PER_LINE * 11 + 64];
+	static char line[3 * RAW_PER_LINE * 11 + 64];
 	unsigned int i, j, parts = (n + RAW_PER_LINE - 1) / RAW_PER_LINE;
 
 	for (i = 0; i < parts; i++) {
@@ -186,7 +186,7 @@ static void bench_corpus(struct kunit *test)
 		/* "allow" is dispatch overhead only; no caught variant needed. */
 		for (variant = 0; variant < (corpus[i].demand ? 2 : 1); variant++) {
 			const struct corpus_item *item = &corpus[i];
-			char code[CODE_MAX];
+			static char code[CODE_MAX];
 			u64 cold, mean, lo, hi, t0, t1;
 			char name[96];
 			int ret, first;
@@ -245,7 +245,7 @@ static const struct {
 static void expiry_cell(struct kunit *test, const char *tag,
 			const char *body, bool atomic, u64 *allow_mean)
 {
-	char code[CODE_MAX];
+	static char code[CODE_MAX];
 	u64 t0, t1, mean, lo, hi;
 	unsigned int k;
 	int ret, n;
