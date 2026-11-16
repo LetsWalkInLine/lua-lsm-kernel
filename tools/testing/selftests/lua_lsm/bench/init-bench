@@ -55,7 +55,8 @@ case "$SCN" in
 timeout) EXPECT=eio ;;
 esac
 log "LUA_BENCH: scenario $SCN expect $EXPECT"
-/bench-syscall "$SCN" /bench-target "$EXPECT" "$COUNTS" || fail 'bench-syscall failed'
+set -- $(echo "$COUNTS" | tr ',' ' ')
+/bench-syscall "$SCN" /bench-target "$EXPECT" "$1" "$2" "$3" "$4" "$5" || fail 'bench-syscall failed'
 log 'LUA_BENCH: PASS'
 sync
 reboot -f

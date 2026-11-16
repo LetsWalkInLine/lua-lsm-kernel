@@ -212,7 +212,7 @@ def cmd_build(args):
     # in the documented historical builds.  O_LARGEFILE=0 matches the
     # kernel host-tool convention.
     hostcflags = "-DO_LARGEFILE=0 -include /usr/include/byteswap.h -include /usr/include/endian.h"
-    for name in (args.kernels or ["b0", "b1", "b2"]):
+    for name in (args.kernels.split(",") if args.kernels else ["b0", "b1", "b2"]):
         src = BUILD / "trees" / name
         out = BUILD / "build" / name
         out.mkdir(parents=True, exist_ok=True)
