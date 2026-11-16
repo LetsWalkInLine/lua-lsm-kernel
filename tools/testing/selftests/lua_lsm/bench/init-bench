@@ -59,7 +59,11 @@ timeout) EXPECT=eio ;;
 esac
 log "LUA_BENCH: scenario $SCN expect $EXPECT"
 set -- $(echo "$COUNTS" | tr ',' ' ')
-/bench-syscall "$SCN" /bench-target "$EXPECT" "$1" "$2" "$3" "$4" "$5" || fail 'bench-syscall failed'
+# Program output goes to a file and is emitted after exit: the tty layer
+# flushes userspace writes asynchronously and printk would otherwise
+# wedge itself into the middle of raw sample lines.
+/bench-syscall "$SCN" /bench-target "$EXPECT" "$1" "$2" "$3" "$4" "$5" > /bench-out.txt || fail 'bench-syscall failed'
+cat /bench-out.txt
 log 'LUA_BENCH: PASS'
 sync
 reboot -f
