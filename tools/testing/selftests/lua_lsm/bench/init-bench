@@ -53,6 +53,8 @@ esac
 dmesg -n 1 || fail 'cannot lower console loglevel'
 
 echo target > /bench-target || fail 'cannot create bench target'
+# Resolve the sample counts before any policy can interfere.
+COUNTS_ARGS=$(echo "$COUNTS" | tr ',' ' ') || fail 'cannot split counts'
 case "$SCN" in
 nopolicy|nolua) ;;
 *) cat /bench-policy.lua > /sys/kernel/security/lua/register || fail "register $SCN" ;;
@@ -63,7 +65,7 @@ case "$SCN" in
 timeout) EXPECT=eio ;;
 esac
 log "LUA_BENCH: scenario $SCN expect $EXPECT"
-set -- $(echo "$COUNTS" | tr ',' ' ')
+set -- $COUNTS_ARGS
 # Program output goes to a file and is emitted after exit: the tty layer
 # flushes userspace writes asynchronously and printk would otherwise
 # wedge itself into the middle of raw sample lines.
