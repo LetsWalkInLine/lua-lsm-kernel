@@ -5,13 +5,12 @@
 # serves pilot and formal runs.
 export PATH=/bin
 
+# Plain tty output: init markers must not race the program output, and
+# kernel printk is silenced below because console writes can clobber
+# bytes mid-line in the tty stream.
 log()
 {
-	if test -c /dev/kmsg; then
-		printf '<6>%s\n' "$*" > /dev/kmsg
-	else
-		printf '%s\n' "$*"
-	fi
+	printf '%s\n' "$*"
 }
 
 fail()
@@ -47,6 +46,12 @@ case "$SCN" in
 nolua) case ",$(cat /sys/kernel/security/lsm)," in *,lua,*) fail 'lua active for nolua' ;; esac ;;
 esac
 
+# Keep the serial console free of kernel printk while raw samples are
+# emitted: console writes and tty writes share the UART and a printk
+# can clobber bytes mid-line.  Diagnostics are checked from the dmesg
+# buffer at the end instead.
+dmesg -n 1 || fail 'cannot lower console loglevel'
+
 echo target > /bench-target || fail 'cannot create bench target'
 case "$SCN" in
 nopolicy|nolua) ;;
@@ -64,6 +69,10 @@ set -- $(echo "$COUNTS" | tr ',' ' ')
 # wedge itself into the middle of raw sample lines.
 /bench-syscall "$SCN" /bench-target "$EXPECT" "$1" "$2" "$3" "$4" "$5" > /bench-out.txt || fail 'bench-syscall failed'
 cat /bench-out.txt
+if dmesg | grep -qE 'BUG:|WARNING:|Oops:|Kernel panic|KASAN:|UBSAN:'; then
+	dmesg | tail -80
+	fail 'kernel diagnostic appeared during the benchmark'
+fi
 log 'LUA_BENCH: PASS'
 sync
 reboot -f
