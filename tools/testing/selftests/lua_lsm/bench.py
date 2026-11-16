@@ -230,7 +230,7 @@ def cmd_build(args):
         rec = {"kernel": name, "commit": setup["kernels"][name]["commit"],
                "config_sha256": digest(out / ".config"),
                "bzImage_sha256": digest(bz),
-               "gcc": sh(*cc.split()[0:1], "--version").stdout.splitlines()[0],
+               "gcc": sh("gcc", "--version").stdout.splitlines()[0],
                "built": time.strftime("%Y-%m-%dT%H:%M:%S")}
         (out / "build.json").write_text(json.dumps(rec, indent=2) + "\n")
         print(f"built {name}: {rec['bzImage_sha256'][:12]}")
@@ -668,18 +668,18 @@ def cmd_stats(args):
         report["sys"][f"{kernel}/{scn}"] = entry
     incs = {}
     for scn in sorted({k[1] for k in sysdata}):
-        for a, b in (("b1", "b0"), ("b2", "b1"), ("b2", "b0")):
-            ka, kb = sysdata.get((a, scn)), sysdata.get((b, scn))
-            if not ka or not kb:
+        for old, new in (("b0", "b1"), ("b1", "b2"), ("b0", "b2")):
+            kold, knew = sysdata.get((old, scn)), sysdata.get((new, scn))
+            if not kold or not knew:
                 continue
-            ma = [sum(x["samples"]) / len(x["samples"]) for x in ka]
-            mb = [sum(x["samples"]) / len(x["samples"]) for x in kb]
-            la = [x for boot in ka for x in boot["samples"]]
-            lb = [x for boot in kb for x in boot["samples"]]
-            incs[f"{scn}:{b}-{a}"] = {
-                "delta_boot_mean_ns": (sum(mb) / len(mb)) - (sum(ma) / len(ma)),
-                "ratio_pooled": (sum(lb) / len(lb)) / (sum(la) / len(la)),
-                "per_boot_ratios": [y / x for x, y in zip(sorted(ma), sorted(mb))],
+            mold = [sum(x["samples"]) / len(x["samples"]) for x in kold]
+            mnew = [sum(x["samples"]) / len(x["samples"]) for x in knew]
+            lold = [x for boot in kold for x in boot["samples"]]
+            lnew = [x for boot in knew for x in boot["samples"]]
+            incs[f"{scn}:{new}-{old}"] = {
+                "delta_boot_mean_ns": (sum(mnew) / len(mnew)) - (sum(mold) / len(mold)),
+                "ratio_pooled": (sum(lnew) / len(lnew)) / (sum(lold) / len(lold)),
+                "per_boot_ratios": [y / x for x, y in zip(sorted(mold), sorted(mnew))],
             }
     report["sys_increments"] = incs
     kdata = {}
