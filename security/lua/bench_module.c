@@ -24,8 +24,8 @@
 #include <linux/lua.h>
 #include <linux/printk.h>
 #include <linux/string.h>
-#include "../lsm.h"
-#include "../lsm_defs.h"
+#include "lsm.h"
+#include "lsm_defs.h"
 
 /* Maintained by the LSM framework; unlike lua_lsm_initialized it survives init. */
 extern int lua_lsm_enabled;

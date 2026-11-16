@@ -206,6 +206,12 @@ def cmd_setup(args):
 def cmd_build(args):
     setup = json.loads((BUILD / "setup.json").read_text())
     cc = os.environ.get("CC", "ccache gcc")
+    # The tools/endian.h stub under scripts/include shadows the system
+    # header and leaves BYTE_ORDER undefined, which silently breaks the
+    # x86 relocs host tool; force-include the system headers first, as
+    # in the documented historical builds.  O_LARGEFILE=0 matches the
+    # kernel host-tool convention.
+    hostcflags = "-DO_LARGEFILE=0 -include /usr/include/byteswap.h -include /usr/include/endian.h"
     for name in (args.kernels or ["b0", "b1", "b2"]):
         src = BUILD / "trees" / name
         out = BUILD / "build" / name
@@ -215,8 +221,8 @@ def cmd_build(args):
         sh("make", "-C", str(src), f"O={out}", "olddefconfig", env=env)
         log = (out / "build.log").open("w")
         r = subprocess.run(["make", "-C", str(src), f"O={out}", f"-j{args.jobs}",
-                            "CC=" + cc, "bzImage"], env=env,
-                           stdout=log, stderr=subprocess.STDOUT)
+                            "CC=" + cc, "HOSTCFLAGS=" + hostcflags, "bzImage"],
+                           env=env, stdout=log, stderr=subprocess.STDOUT)
         log.close()
         if r.returncode:
             raise SystemExit(f"build failed for {name}")
