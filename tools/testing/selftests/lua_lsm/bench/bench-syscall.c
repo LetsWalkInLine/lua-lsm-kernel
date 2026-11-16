@@ -55,7 +55,7 @@ static void print_raw(const char *tag, const int64_t *v, size_t n)
 	size_t i, j, parts = (n + RAW_PER_LINE - 1) / RAW_PER_LINE;
 
 	for (i = 0; i < parts; i++) {
-		printf("%s part=%zu/%zu", tag, i, parts);
+		printf("%s part=%zu/%zu ", tag, i, parts);
 		for (j = 0; j < RAW_PER_LINE && i * RAW_PER_LINE + j < n; j++)
 			printf("%s%" PRId64, j ? "," : "",
 			       v[i * RAW_PER_LINE + j]);
