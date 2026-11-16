@@ -1,0 +1,63 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-only
+# Benchmark guest init: one syscall scenario per boot.  The scenario
+# and sample counts come from the kernel command line, so one image
+# serves pilot and formal runs.
+export PATH=/bin
+
+log()
+{
+	if test -c /dev/kmsg; then
+		printf '<6>%s\n' "$*" > /dev/kmsg
+	else
+		printf '%s\n' "$*"
+	fi
+}
+
+fail()
+{
+	log "LUA_BENCH: FAIL: $*"
+	sync
+	reboot -f
+	sleep 2
+	exec sh
+}
+
+log 'LUA_BENCH: boot'
+uname -a
+mount -t devtmpfs devtmpfs /dev || fail 'cannot mount devtmpfs'
+mount -t proc proc /proc || fail 'cannot mount procfs'
+mount -t sysfs sysfs /sys || fail 'cannot mount sysfs'
+mkdir -p /sys/kernel/security
+mount -t securityfs securityfs /sys/kernel/security || fail 'cannot mount securityfs'
+
+SCN=$(sed -n 's/.*lua_bench_scn=\([^ ]*\).*/\1/p' /proc/cmdline)
+COUNTS=$(sed -n 's/.*lua_bench_counts=\([^ ]*\).*/\1/p' /proc/cmdline)
+test -n "$SCN" || fail 'no lua_bench_scn on cmdline'
+test -n "$COUNTS" || fail 'no lua_bench_counts on cmdline'
+
+case ",$(cat /sys/kernel/security/lsm)," in
+*,lua,*) ;;
+*) case "$SCN" in nolua) ;; *) fail "lua not active for $SCN" ;; esac ;;
+esac
+case "$SCN" in
+nolua) case ",$(cat /sys/kernel/security/lsm)," in *,lua,*) fail 'lua active for nolua' ;; esac ;;
+esac
+
+echo target > /bench-target || fail 'cannot create bench target'
+case "$SCN" in
+nopolicy|nolua) ;;
+*) cat /bench-policy.lua > /sys/kernel/security/lua/register || fail "register $SCN" ;;
+esac
+
+EXPECT=ok
+case "$SCN" in
+timeout) EXPECT=eio ;;
+esac
+log "LUA_BENCH: scenario $SCN expect $EXPECT"
+/bench-syscall "$SCN" /bench-target "$EXPECT" "$COUNTS" || fail 'bench-syscall failed'
+log 'LUA_BENCH: PASS'
+sync
+reboot -f
+sleep 2
+exec sh

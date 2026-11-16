@@ -1,0 +1,65 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-only
+# Kernel-side benchmark guest init: the lua-lsm-bench KUnit suite runs
+# at boot; wait for its completion markers, then reboot.
+export PATH=/bin
+
+log()
+{
+	if test -c /dev/kmsg; then
+		printf '<6>%s\n' "$*" > /dev/kmsg
+	else
+		printf '%s\n' "$*"
+	fi
+}
+
+fail()
+{
+	log "LUA_BENCH: FAIL: $*"
+	sync
+	reboot -f
+	sleep 2
+	exec sh
+}
+
+log 'LUA_BENCH: boot'
+uname -a
+mount -t devtmpfs devtmpfs /dev || fail 'cannot mount devtmpfs'
+mount -t proc proc /proc || fail 'cannot mount procfs'
+mount -t sysfs sysfs /sys || fail 'cannot mount sysfs'
+mkdir -p /sys/kernel/security
+mount -t securityfs securityfs /sys/kernel/security || fail 'cannot mount securityfs'
+
+case ",$(cat /sys/kernel/security/lsm)," in
+*,lua,*) ;;
+*) fail 'lua is not active' ;;
+esac
+
+NEED=1
+if grep -q 'lua_bench_expiry' /proc/cmdline; then NEED=2; fi
+wait_marker()
+{
+	i=0
+	while test $i -lt 600; do
+		if dmesg | grep -q "$1"; then
+			return 0
+		fi
+		sleep 1
+		i=$((i + 1))
+	done
+	return 1
+}
+if ! wait_marker 'BENCH_DONE phase=corpus'; then
+	fail 'corpus phase did not complete'
+fi
+if test "$NEED" -eq 2 && ! wait_marker 'BENCH_DONE phase=expiry'; then
+	fail 'expiry phase did not complete'
+fi
+if dmesg | grep -q 'not ok .*lua-lsm-bench'; then
+	fail 'suite reported failure'
+fi
+log 'LUA_BENCH: PASS'
+sync
+reboot -f
+sleep 2
+exec sh

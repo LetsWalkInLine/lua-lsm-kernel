@@ -44,3 +44,14 @@ config SECURITY_LUA_LSM_TEST_PROBE
 	help
 	  Log actual receive hook return values and softirq context with a
 	  kretprobe. Enable only in a disposable selftest guest.
+
+config SECURITY_LUA_LSM_BENCH
+	bool "Lua-LSM benchmark driver"
+	depends on SECURITY_LUA_LSM=y && KUNIT=y
+	default n
+	help
+	  In-kernel timing driver for the Lua-LSM benchmark delivery:
+	  string-quota corpus cost through the production dispatch path
+	  and VM execution deadline termination latency.  The expiry
+	  policies loop until the deadline on purpose, so run only in a
+	  disposable guest behind a host watchdog.

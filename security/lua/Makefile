@@ -21,3 +21,4 @@ lua-lsm-$(CONFIG_SECURITY_LUA_LSM_KUNIT_TEST) += \
 	tests/string_budget_integration_kunit.o
 
 lua-lsm-$(CONFIG_SECURITY_LUA_LSM_TEST_PROBE) += tests/receive_probe.o
+lua-lsm-$(CONFIG_SECURITY_LUA_LSM_BENCH) += bench_module.o
