@@ -34,6 +34,7 @@ case ",$(cat /sys/kernel/security/lsm)," in
 *,lua,*) ;;
 *) fail 'lua is not active' ;;
 esac
+log "LUA_BENCH: lsm: $(cat /sys/kernel/security/lsm)"
 
 NEED=1
 if grep -q 'lua_bench_expiry' /proc/cmdline; then NEED=2; fi

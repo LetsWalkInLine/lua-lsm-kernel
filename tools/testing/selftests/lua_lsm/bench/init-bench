@@ -31,6 +31,9 @@ mount -t sysfs sysfs /sys || fail 'cannot mount sysfs'
 mkdir -p /sys/kernel/security
 mount -t securityfs securityfs /sys/kernel/security || fail 'cannot mount securityfs'
 
+ACTIVE=$(cat /sys/kernel/security/lsm) || fail 'cannot read active LSMs'
+log "LUA_BENCH: lsm: $ACTIVE"
+
 SCN=$(sed -n 's/.*lua_bench_scn=\([^ ]*\).*/\1/p' /proc/cmdline)
 COUNTS=$(sed -n 's/.*lua_bench_counts=\([^ ]*\).*/\1/p' /proc/cmdline)
 test -n "$SCN" || fail 'no lua_bench_scn on cmdline'
