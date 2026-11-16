@@ -50,25 +50,47 @@ static int cmp64(const void *a, const void *b)
 
 static double sqrt_(double x);
 
+/* One write() per line: kernel printk must not wedge itself into the
+ * middle of a raw sample line on the serial console. */
+static void emit(const char *buf, size_t len)
+{
+	if (fwrite(buf, 1, len, stdout) != len)
+		exit(2);
+}
+
 static void print_raw(const char *tag, const int64_t *v, size_t n)
 {
+	char line[512];
 	size_t i, j, parts = (n + RAW_PER_LINE - 1) / RAW_PER_LINE;
+	int w;
 
 	for (i = 0; i < parts; i++) {
-		printf("%s part=%zu/%zu ", tag, i, parts);
-		for (j = 0; j < RAW_PER_LINE && i * RAW_PER_LINE + j < n; j++)
-			printf("%s%" PRId64, j ? "," : "",
-			       v[i * RAW_PER_LINE + j]);
-		printf("\n");
+		size_t len = 0;
+
+		w = snprintf(line, sizeof(line), "%s part=%zu/%zu ", tag, i, parts);
+		if (w < 0 || (size_t)w >= sizeof(line))
+			exit(2);
+		len = w;
+		for (j = 0; j < RAW_PER_LINE && i * RAW_PER_LINE + j < n; j++) {
+			w = snprintf(line + len, sizeof(line) - len, "%s%" PRId64,
+				     j ? "," : "", v[i * RAW_PER_LINE + j]);
+			if (w < 0 || (size_t)w >= sizeof(line) - len)
+				exit(2);
+			len += w;
+		}
+		line[len++] = '\n';
+		emit(line, len);
 	}
 }
 
 /* mean/stdev/min/p50/p90/p95/p99/max over a sorted copy of the samples. */
 static void print_stats(const char *tag, const int64_t *v, size_t n)
 {
+	char line[512];
 	int64_t *s = malloc(n * sizeof(*s));
 	double sum = 0, sum2 = 0;
 	size_t i;
+	int w;
 
 	if (!s) {
 		printf("%s ERROR malloc\n", tag);
@@ -80,13 +102,17 @@ static void print_stats(const char *tag, const int64_t *v, size_t n)
 		sum += s[i];
 		sum2 += (double)s[i] * s[i];
 	}
-	printf("%s n=%zu mean=%.1f stdev=%.1f min=%" PRId64 " p50=%" PRId64
-	       " p90=%" PRId64 " p95=%" PRId64 " p99=%" PRId64 " max=%" PRId64 "\n",
-	       tag, n, sum / n,
-	       n > 1 ? sqrt_(sum2 / n - (sum / n) * (sum / n)) : 0.0,
-	       s[0], s[n / 2], s[n * 90 / 100], s[n * 95 / 100],
-	       s[n * 99 / 100], s[n - 1]);
+	w = snprintf(line, sizeof(line),
+		     "%s n=%zu mean=%.1f stdev=%.1f min=%" PRId64 " p50=%" PRId64
+		     " p90=%" PRId64 " p95=%" PRId64 " p99=%" PRId64 " max=%" PRId64 "\n",
+		     tag, n, sum / n,
+		     n > 1 ? sqrt_(sum2 / n - (sum / n) * (sum / n)) : 0.0,
+		     s[0], s[n / 2], s[n * 90 / 100], s[n * 95 / 100],
+		     s[n * 99 / 100], s[n - 1]);
 	free(s);
+	if (w < 0 || (size_t)w >= sizeof(line))
+		exit(2);
+	emit(line, strlen(line));
 }
 
 static double sqrt_(double x)
