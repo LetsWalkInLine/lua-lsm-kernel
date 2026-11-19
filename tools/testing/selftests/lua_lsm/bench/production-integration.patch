@@ -1,0 +1,30 @@
+# SPDX-License-Identifier: GPL-2.0-only
+# Benchmark integration for production comparison trees (B0/B1/B2).
+# The Kconfig/Makefile changes from the benchmark branch, in the
+# context of the production security/lua files that carry no test
+# entries.  bench.py setup applies this patch after copying the bench
+# files, and verifies it with --dry-run on every tree first.
+--- a/security/lua/Kconfig
++++ b/security/lua/Kconfig
+@@ -25,3 +25,14 @@
+ 	  This enables debugging code designed to help Lua-LSM kernel
+ 	  developers, unless you know what this does in the kernel code you
+ 	  should leave this disabled.
++
++config SECURITY_LUA_LSM_BENCH
++	bool "Lua-LSM benchmark driver"
++	depends on SECURITY_LUA_LSM=y && KUNIT=y
++	default n
++	help
++	  In-kernel timing driver for the Lua-LSM benchmark delivery:
++	  string-quota corpus cost through the production dispatch path
++	  and VM execution deadline termination latency.  The expiry
++	  policies loop until the deadline on purpose, so run only in a
++	  disposable guest behind a host watchdog.
+--- a/security/lua/Makefile
++++ b/security/lua/Makefile
+@@ -11,3 +11,4 @@
+ 	lua_mm.o \
+ 	lua_kernel.o lua_fs.o lua_net.o \
+ 	lua_errno.o lua_capability.o lua_signal.o lua_audit.o
++lua-lsm-$(CONFIG_SECURITY_LUA_LSM_BENCH) += bench_module.o

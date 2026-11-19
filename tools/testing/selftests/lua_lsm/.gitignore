@@ -1,1 +1,4 @@
 __pycache__/
+# The benchmark integration patch is tracked despite the tree-wide
+# *.patch ignore rule; bench.py setup reads it on a clean checkout.
+!bench/production-integration.patch

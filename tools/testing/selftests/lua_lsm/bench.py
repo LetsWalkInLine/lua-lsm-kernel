@@ -655,15 +655,15 @@ def cmd_stats(args):
         if ident["extra"]["kind"] != "sys":
             continue
         key = (ident["kernel"], ident["extra"]["scenario"])
-        sysdata.setdefault(key, []).append(parsed)
+        sysdata.setdefault(key, []).append((ident["extra"].get("round"), parsed))
     for (kernel, scn), boots in sorted(sysdata.items()):
         entry = {}
         for field in ("cold", "samples"):
-            per_boot = [sum(b[field]) / len(b[field]) for b in boots]
-            pooled = [x for b in boots for x in b[field]]
+            per_boot = [sum(b[field]) / len(b[field]) for _, b in boots]
+            pooled = [x for _, b in boots for x in b[field]]
             entry[field] = {"per_boot_mean": per_boot, "pooled": summarize(pooled)}
-        thr = [x / b["bsize"] for b in boots for x in b["blocks"]]
-        thr_boot = [sum(b["blocks"]) / (len(b["blocks"]) * b["bsize"]) for b in boots]
+        thr = [x / b["bsize"] for _, b in boots for x in b["blocks"]]
+        thr_boot = [sum(b["blocks"]) / (len(b["blocks"]) * b["bsize"]) for _, b in boots]
         entry["throughput"] = {"per_boot_mean": thr_boot, "pooled": summarize(thr)}
         report["sys"][f"{kernel}/{scn}"] = entry
     incs = {}
@@ -672,14 +672,18 @@ def cmd_stats(args):
             kold, knew = sysdata.get((old, scn)), sysdata.get((new, scn))
             if not kold or not knew:
                 continue
-            mold = [sum(x["samples"]) / len(x["samples"]) for x in kold]
-            mnew = [sum(x["samples"]) / len(x["samples"]) for x in knew]
-            lold = [x for boot in kold for x in boot["samples"]]
-            lnew = [x for boot in knew for x in boot["samples"]]
+            # Pair boots of the two kernels by round: per-round ratios
+            # must keep the actual round correspondence, not sort both
+            # sides independently.
+            mold = {r: sum(x["samples"]) / len(x["samples"]) for r, x in kold}
+            mnew = {r: sum(x["samples"]) / len(x["samples"]) for r, x in knew}
+            common = sorted(set(mold) & set(mnew))
+            lold = [x for _, b in kold for x in b["samples"]]
+            lnew = [x for _, b in knew for x in b["samples"]]
             incs[f"{scn}:{new}-{old}"] = {
-                "delta_boot_mean_ns": (sum(mnew) / len(mnew)) - (sum(mold) / len(mold)),
+                "delta_boot_mean_ns": (sum(mnew.values()) / len(mnew)) - (sum(mold.values()) / len(mold)),
                 "ratio_pooled": (sum(lnew) / len(lnew)) / (sum(lold) / len(lold)),
-                "per_boot_ratios": [y / x for x, y in zip(sorted(mold), sorted(mnew))],
+                "per_round_ratios": {str(r): mnew[r] / mold[r] for r in common},
             }
     report["sys_increments"] = incs
     kdata = {}
