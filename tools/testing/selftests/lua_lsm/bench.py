@@ -101,6 +101,37 @@ def verify_integration(names):
                          f"re-run setup for all of {names}: {mixed}")
 
 
+def verify_images(names):
+    """Verify the images that will actually boot: each kernel needs a
+    build record whose bzImage digest matches the file on disk and whose
+    recorded integration hash matches the live tree, and every compared
+    kernel must have been built from the same bench integration.  This
+    catches stale images left behind when only some kernels were
+    rebuilt after a source update."""
+    seen = {}
+    for name in names:
+        out = BUILD / "build" / name
+        rec_path = out / "build.json"
+        bz = out / "arch/x86/boot/bzImage"
+        if not rec_path.exists() or not bz.exists():
+            raise SystemExit(f"missing kernel build for {name}; run build")
+        rec = json.loads(rec_path.read_text())
+        actual = digest(bz)
+        if actual != rec.get("bzImage_sha256"):
+            raise SystemExit(f"bzImage for {name} does not match its build "
+                             f"record; rebuild it")
+        live = integration_hashes(BUILD / "trees" / name)
+        if rec.get("integration_sha256") != live:
+            raise SystemExit(f"build record for {name} predates the current "
+                             f"benchmark sources; rebuild it")
+        seen[name] = rec.get("integration_sha256")
+    first = seen[names[0]]
+    mixed = {n: h for n, h in seen.items() if h != first}
+    if mixed:
+        raise SystemExit("kernels were built from different benchmark "
+                         f"integrations; rebuild all of {names}: {mixed}")
+
+
 # ---------------------------------------------------------------- setup
 
 def make_b0():
@@ -284,6 +315,7 @@ def cmd_build(args):
         rec = {"kernel": name, "commit": setup["kernels"][name]["commit"],
                "config_sha256": digest(out / ".config"),
                "bzImage_sha256": digest(bz),
+               "integration_sha256": integration_hashes(src),
                "cc": cc, "gcc": cc_version,
                "built": time.strftime("%Y-%m-%dT%H:%M:%S")}
         (out / "build.json").write_text(json.dumps(rec, indent=2) + "\n")
@@ -508,6 +540,7 @@ def cmd_sys(args):
         scenarios = scenarios + [TIMEOUT_SCENARIO]
     kernels = args.kernels.split(",") if args.kernels else ["b0", "b1", "b2"]
     verify_integration(kernels)
+    verify_images(kernels)
     busybox = Path(args.busybox)
     bz = {k: BUILD / "build" / k / "arch/x86/boot/bzImage" for k in kernels}
     for k, p in bz.items():
@@ -516,6 +549,7 @@ def cmd_sys(args):
     runs = Path(args.runs)
     runs.mkdir(parents=True, exist_ok=True)
     boot = 0
+    diagnostics = 0
     for rnd in range(args.rounds):
         for si, scn in enumerate(scenarios):
             off = (rnd + si) % len(kernels)
@@ -567,12 +601,17 @@ def cmd_sys(args):
                     parsed, out = boot_with_retry(f"{kernel}/{scn}", once)
                 except MeasurementEvent as e:
                     print(f"measurement event kept, boot skipped: {e}")
+                    if "[diagnostic]" in str(e):
+                        diagnostics += 1
                     continue
                 s = parsed["stats"]
                 print(f"[{boot:03d}] r{rnd} {kernel}/{scn}: "
                       f"sample mean {s['samples']['mean']:.0f}ns "
                       f"p95 {s['samples']['p95']:.0f}ns "
                       f"block {s['blocks']['mean'] / parsed['bsize']:.0f}ns/op")
+    if diagnostics:
+        raise SystemExit(f"{diagnostics} sys boot(s) hit kernel diagnostics; "
+                         "see run-events.jsonl and the kept -diagnostic logs")
 
 
 OVER_ITEMS = {"escapeover76191", "findover76191", "trimsp1026", "basename4095"}
@@ -766,6 +805,13 @@ class MeasurementEvent(Exception):
     timeout mid-sample.  Recorded, never silently retried."""
 
 
+# Kernel-level diagnostics dominate every other classification: a boot
+# with BUG/WARNING/Oops/panic is never a usable measurement, even when
+# flip markers are present.
+KERNEL_DIAGNOSTIC_PATTERNS = (
+    re.compile(r"(?:BUG:|WARNING:|Oops:|Kernel panic|KASAN:|UBSAN:)"),
+)
+
 # Console markers that identify a genuine measurement flip: the kernel
 # module's per-call consistency assertion, or a userspace sample whose
 # return category changed under the VM deadline.
@@ -774,30 +820,31 @@ FLIP_PATTERNS = (
     re.compile(r"BENCH_(?:COLD|WARMUP|SAMPLE|THROUGH)[^\n]*FAIL"),
 )
 
-# Guest-side diagnostics: kernel warnings and KUnit assertion failures
-# are product or setup problems, never acquisition noise, and must not
-# be auto-retried away.
-DIAGNOSTIC_PATTERNS = (
-    re.compile(r"(?:BUG:|WARNING:|Oops:|Kernel panic|KASAN:|UBSAN:)"),
+# KUnit assertion failures are product or setup problems, never
+# acquisition noise, and must not be auto-retried away.
+KUNIT_FAILURE_PATTERNS = (
     re.compile(r"(?:EXPECTATION|ASSERTION) FAILED"),
     re.compile(r"\bnot ok \d"),
 )
 
 
 def classify_failure(log_lines):
-    """Classify a failed boot: measurement, diagnostic or acquisition.
+    """Classify a failed boot: diagnostic, measurement or acquisition.
 
-    Only 'acquisition' boots are auto-retried; the other classes are
-    recorded and skipped.  Flips are checked first because their boots
-    also contain KUnit failure markers."""
+    Only 'acquisition' boots are auto-retried.  Kernel diagnostics win
+    over flip markers; flips win over KUnit markers because their boots
+    legitimately carry 'not ok' results."""
     text = "\n".join(log_lines)
+    for pat in KERNEL_DIAGNOSTIC_PATTERNS:
+        if pat.search(text):
+            return "diagnostic"
     for pat in FLIP_PATTERNS:
         if isinstance(pat, str):
             if pat in text:
                 return "measurement"
         elif pat.search(text):
             return "measurement"
-    for pat in DIAGNOSTIC_PATTERNS:
+    for pat in KUNIT_FAILURE_PATTERNS:
         if pat.search(text):
             return "diagnostic"
     return "acquisition"
@@ -829,11 +876,13 @@ def boot_with_retry(desc, boot_once, attempts=3):
 def cmd_kern(args):
     kernels = args.kernels.split(",") if args.kernels else ["b0", "b1", "b2"]
     verify_integration(kernels)
+    verify_images(kernels)
     busybox = Path(args.busybox)
     image = build_image("kunit", None, busybox)
     runs = Path(args.runs)
     runs.mkdir(parents=True, exist_ok=True)
     boot = 0
+    diagnostics = 0
     for rnd in range(args.rounds):
         order = kernels[rnd % len(kernels):] + kernels[:rnd % len(kernels)]
         for kernel in order:
@@ -881,11 +930,16 @@ def cmd_kern(args):
                 parsed, out = boot_with_retry(f"{kernel} kern", once)
             except MeasurementEvent as e:
                 print(f"measurement event kept, boot skipped: {e}")
+                if "[diagnostic]" in str(e):
+                    diagnostics += 1
                 continue
             first = next(r for r in parsed["corpus"] if r["name"] != "allow")
             print(f"[{boot:03d}] r{rnd} {kernel} kern: "
                   f"{len(parsed['corpus'])} corpus recs, {len(parsed['expiry'])} expiry recs, "
                   f"e.g. {first['name']}/{first['variant']} mean {first['stats']['mean']}ns")
+    if diagnostics:
+        raise SystemExit(f"{diagnostics} kern boot(s) hit kernel diagnostics; "
+                         "see run-events.jsonl and the kept -diagnostic logs")
 
 # ---------------------------------------------------------------- stats
 
@@ -979,7 +1033,14 @@ def cmd_stats(args):
             common = sorted(set(mold) & set(mnew))
             lold = [x for _, b in kold for x in b["samples"]]
             lnew = [x for _, b in knew for x in b["samples"]]
+            # Latency deltas come from the commonly valid rounds only,
+            # so extra successful boots on one side cannot skew the
+            # comparison when the other side skipped a round.
+            pair_deltas = [mnew[r] - mold[r] for r in common]
             incs[f"{scn}:{new}-{old}"] = {
+                "delta_common_rounds_ns": (sum(pair_deltas) / len(pair_deltas)
+                                           if pair_deltas else None),
+                "common_rounds": len(common),
                 "delta_boot_mean_ns": (sum(mnew.values()) / len(mnew)) - (sum(mold.values()) / len(mold)),
                 "ratio_pooled": (sum(lnew) / len(lnew)) / (sum(lold) / len(lold)),
                 "per_round_ratios": {str(r): mnew[r] / mold[r] for r in common},

@@ -65,13 +65,16 @@ def sys_tables(summary, boots):
             row.append(f" {vals[k]:.0f} |" if k in vals else " - |")
         lines.append("".join(row))
         lines.append("")
-    inc_lines = ["### 增量（pooled mean，ns）", "",
-                 "| 场景 | B1-B0 | B2-B1 | B2-B0 |", "| --- | ---: | ---: | ---: |"]
+    inc_lines = ["### 增量（共同有效轮次配对均值差，ns）", "",
+                 "| 场景 | B1−B0 (n) | B2−B1 (n) | B2−B0 (n) |", "| --- | ---: | ---: | ---: |"]
     for scn in scenarios:
         cells = []
         for pair in ("b1-b0", "b2-b1", "b2-b0"):
             e = summary["sys_increments"].get(f"{scn}:{pair}")
-            cells.append(f" {e['delta_boot_mean_ns']:+.0f} |" if e else " - |")
+            if e and e.get("delta_common_rounds_ns") is not None:
+                cells.append(f" {e['delta_common_rounds_ns']:+.0f} ({e['common_rounds']}) |")
+            else:
+                cells.append(" - |")
         inc_lines.append(f"| {scn} |" + "".join(cells))
     return lines, inc_lines
 
