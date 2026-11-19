@@ -152,6 +152,11 @@ def kernel_commit(name):
 
 def cmd_setup(args):
     BUILD.mkdir(parents=True, exist_ok=True)
+    selected = [k for k in (args.kernels.split(",") if args.kernels
+                            else ["b0", "b1", "b2"])]
+    unknown = [k for k in selected if k not in KERNELS]
+    if unknown or not selected:
+        raise SystemExit(f"unknown kernels {unknown}; choose from {sorted(KERNELS)}")
     bench_files = [
         "security/lua/bench_module.c",
         "tools/testing/selftests/lua_lsm/bench.config",
@@ -162,7 +167,7 @@ def cmd_setup(args):
     overlay = FIXTURES / "production-integration.patch"
     identity = {"bench_branch_head": git("rev-parse", "HEAD").stdout.strip(),
                 "kernels": {}}
-    for name in (args.kernels or ["b0", "b1", "b2"]):
+    for name in selected:
         commit = kernel_commit(name)
         tree = BUILD / "trees" / name
         if tree.exists():
@@ -192,15 +197,15 @@ def cmd_setup(args):
                 and parents[2] == B1_STRING, parents
         identity["kernels"][name] = rec
         print(f"{name}: commit {commit[:12]} tree {rec['tree'][:12]} ({rec['desc']})")
-    # The applied integration must be identical on every tree.
+    # The applied integration must be identical on every selected tree.
     hashes = {}
     for name in identity["kernels"]:
         hashes[name] = {rel: digest(BUILD / "trees" / name / rel)
                         for rel in ("security/lua/Kconfig", "security/lua/Makefile",
                                     "security/lua/bench_module.c")}
-    first = hashes["b0"]
-    assert all(h == first for h in hashes.values()), hashes
-    identity["integration_sha256"] = first
+    baseline = hashes[selected[0]]
+    assert all(h == baseline for h in hashes.values()), hashes
+    identity["integration_sha256"] = baseline
     (BUILD / "setup.json").write_text(json.dumps(identity, indent=2) + "\n")
     print("Setup complete:", BUILD / "setup.json")
 
@@ -230,11 +235,18 @@ def cmd_build(args):
         log.close()
         if r.returncode:
             raise SystemExit(f"build failed for {name}")
+        # The compiler that kbuild actually probed, whatever CC names
+        # (ccache wrapper, alternate gcc or clang).
+        cc_version = "unknown"
+        for line in (out / ".config").read_text().splitlines():
+            if line.startswith("CONFIG_CC_VERSION_TEXT="):
+                cc_version = line.split("=", 1)[1].strip('"')
+                break
         bz = out / "arch/x86/boot/bzImage"
         rec = {"kernel": name, "commit": setup["kernels"][name]["commit"],
                "config_sha256": digest(out / ".config"),
                "bzImage_sha256": digest(bz),
-               "gcc": sh("gcc", "--version").stdout.splitlines()[0],
+               "cc": cc, "gcc": cc_version,
                "built": time.strftime("%Y-%m-%dT%H:%M:%S")}
         (out / "build.json").write_text(json.dumps(rec, indent=2) + "\n")
         print(f"built {name}: {rec['bzImage_sha256'][:12]}")
@@ -256,11 +268,23 @@ def make_busybox_root(root, busybox):
 
 
 def build_image(kind, scenario, busybox):
-    """Prepare the initramfs for a guest kind: sys-<scn> or kunit."""
+    """Prepare the initramfs for a guest kind: sys-<scn> or kunit.
+
+    Reuse only when the image exists AND every input that shapes it
+    (busybox binary, init script, probe source, scenario policy) is
+    byte-identical to the last build; the combined digest is kept
+    beside the image.
+    """
     name = f"{kind}" + (f"-{scenario}" if scenario else "")
     root = BUILD / "images" / name / "rootfs"
     image = BUILD / "images" / name / "initramfs.cpio.gz"
-    if image.exists():
+    stamp = BUILD / "images" / name / ".inputs.sha256"
+    inputs = [busybox, FIXTURES / "init-bench", FIXTURES / "init-benchkunit",
+              FIXTURES / "bench-syscall.c",
+              *sorted((FIXTURES / "policies").glob("*.lua"))]
+    inputs_sha = hashlib.sha256(
+        "\n".join(f"{digest(p)}  {p.name}" for p in inputs).encode()).hexdigest()
+    if image.exists() and stamp.exists() and stamp.read_text().strip() == inputs_sha:
         return image
     if root.exists():
         shutil.rmtree(root)
@@ -285,6 +309,7 @@ def build_image(kind, scenario, busybox):
                              stdout=subprocess.PIPE, check=True).stdout
     comp = subprocess.run(["gzip", "-n", "-9"], input=archive, stdout=subprocess.PIPE, check=True)
     image.write_bytes(comp.stdout)
+    stamp.write_text(inputs_sha + "\n")
     return image
 
 
@@ -486,6 +511,7 @@ OVER_ITEMS = {"escapeover76191", "findover76191", "trimsp1026", "basename4095"}
 def parse_kern(log_lines, expect_expiry):
     corpus, expiry = [], []
     cur = None
+    last_recovery_load = None
     done = set()
     for line in log_lines:
         if "BENCH_INFO phase=corpus" in line:
@@ -515,8 +541,15 @@ def parse_kern(log_lines, expect_expiry):
                 expiry.append(cur)
             elif name == "allow":
                 cur["warm_done"] = True
+            elif name == "recovery-load":
+                # Informational untimed lazy-load call; its cold time is
+                # attached to the recovery record that follows.
+                last_recovery_load = int(m.group(5) or 0)
+                cur = None
             elif name == "recovery":
-                cur = {"kind": "exp_recovery", "shape": tag, "ctx": ctx, "raw": []}
+                cur = {"kind": "exp_recovery", "shape": tag, "ctx": ctx,
+                       "load_cold_ns": last_recovery_load, "raw": []}
+                last_recovery_load = None
                 expiry.append(cur)
             else:
                 cur = {"kind": "exp_timeout", "shape": tag, "ctx": ctx,
@@ -543,30 +576,77 @@ def parse_kern(log_lines, expect_expiry):
     return {"corpus": corpus, "expiry": expiry}
 
 
+CORPUS_VARIANTS = {
+    "allow": ("raw",),
+    "lower4096": ("raw", "caught"),
+    "labelmatch65536": ("raw", "caught"),
+    "replace65536": ("raw", "caught"),
+    "findnear76190": ("raw", "caught"),
+    "escapenear76190": ("raw", "caught"),
+    "escapeover76191": ("raw", "caught"),
+    "findover76191": ("raw", "caught"),
+    "trimsp1026": ("raw", "caught"),
+    "basename4095": ("raw", "caught"),
+}
+EXPIRY_KINDS = ("exp_allow", "exp_timeout", "exp_recovery")
+EXPIRY_COUNTS = {"exp_allow": 32, "exp_timeout": 32, "exp_recovery": 16}
+
+
 def validate_kern(parsed, kernel, expect_expiry):
-    names = {c["name"] for c in parsed["corpus"]}
-    expect_items = {"allow", "lower4096", "labelmatch65536", "replace65536",
-                    "findnear76190", "escapenear76190", "escapeover76191",
-                    "findover76191", "trimsp1026", "basename4095"}
-    if names != expect_items:
-        raise ValueError(f"corpus items mismatch: {sorted(names ^ expect_items)}")
+    limit = kernel in ("b1", "b2")
+    seen = {}
     for rec in parsed["corpus"]:
+        key = (rec["name"], rec["variant"])
+        if key in seen:
+            raise ValueError(f"duplicate corpus record {key}")
+        seen[key] = rec
+    expected = {(name, v) for name, variants in CORPUS_VARIANTS.items()
+                for v in variants}
+    missing = expected - set(seen)
+    extra = set(seen) - expected
+    if missing or extra:
+        raise ValueError(f"corpus records mismatch: missing={sorted(missing)} "
+                         f"extra={sorted(extra)}")
+    for key, rec in seen.items():
         if len(rec["raw"]) != 128 or rec["stats"]["n"] != 128:
-            raise ValueError(f"bad warm count for {rec['name']}/{rec['variant']}")
-        limit = kernel in ("b1", "b2")
+            raise ValueError(f"bad warm count for {key}")
+        name, variant = key
         cat = rec["cat"]
-        if rec["variant"] == "raw":
-            if rec["name"] in OVER_ITEMS and limit:
+        if variant == "raw":
+            if name in OVER_ITEMS and limit:
                 if cat != -5:
-                    raise ValueError(f"{rec['name']} raw cat {cat} != -EIO on {kernel}")
+                    raise ValueError(f"{name} raw cat {cat} != -EIO on {kernel}")
             elif cat != 0:
-                raise ValueError(f"{rec['name']} raw cat {cat} != 0")
+                raise ValueError(f"{name} raw cat {cat} != 0")
         else:
-            if rec["name"] in OVER_ITEMS and limit:
+            if name in OVER_ITEMS and limit:
                 if cat != -16:
-                    raise ValueError(f"{rec['name']} caught cat {cat} != -EBUSY")
+                    raise ValueError(f"{name} caught cat {cat} != -EBUSY")
             elif cat != 0:
-                raise ValueError(f"{rec['name']} caught cat {cat} != 0")
+                raise ValueError(f"{name} caught cat {cat} != 0")
+    if expect_expiry:
+        shapes = {"loop", "pcall", "coroutine", "callback"}
+        exp_seen = {}
+        for rec in parsed["expiry"]:
+            key = (rec["shape"], rec["ctx"], rec["kind"])
+            if key in exp_seen:
+                raise ValueError(f"duplicate expiry record {key}")
+            exp_seen[key] = rec
+        want = {(s, c, k) for s in shapes for c in ("task", "atomic")
+                for k in EXPIRY_KINDS}
+        missing = want - set(exp_seen)
+        extra = set(exp_seen) - want
+        if missing or extra:
+            raise ValueError(f"expiry records mismatch: missing={sorted(missing)} "
+                             f"extra={sorted(extra)}")
+        for key, rec in exp_seen.items():
+            n = EXPIRY_COUNTS[key[2]]
+            if len(rec["raw"]) != n or rec["stats"]["n"] != n:
+                raise ValueError(f"bad sample count for expiry {key}: "
+                                 f"{len(rec['raw'])} != {n}")
+        shapes_seen = {r["shape"] for r in parsed["expiry"]}
+        if shapes_seen != shapes:
+            raise ValueError(f"expiry shapes mismatch: {sorted(shapes_seen ^ shapes)}")
 
 
 def cmd_kern(args):
@@ -719,6 +799,7 @@ def cmd_stats(args):
             "totals": summarize([x for r in recs for x in r["raw"]]),
             "per_boot_mean": [r["stats"]["mean"] for r in recs],
             "allow_mean_per_boot": [r.get("allow_mean") for r in recs],
+            "load_cold_per_boot": [r.get("load_cold_ns") for r in recs],
         }
     out = Path(args.runs) / "summary.json"
     out.write_text(json.dumps(report, indent=2) + "\n")

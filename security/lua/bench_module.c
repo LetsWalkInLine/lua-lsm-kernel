@@ -317,16 +317,29 @@ static void expiry_cell(struct kunit *test, const char *tag,
 		print_raw(test, rawtag, exp_raw, EXP_REPS);
 	}
 
-	/* Recovery: normal calls on the VM that just went through timeouts. */
+	/* Recovery: normal calls on the VM that just went through timeouts.
+	 * The first call re-loads the allow module lazily and must run
+	 * preemptible (module load may allocate); it is untimed so warm
+	 * samples contain no lazy-load cost. */
 	n = snprintf(code, CODE_MAX,
 		     "local M={name='bench_exp_allow',%s}\n"
 		     "M.file_open=function() return true end\nreturn M\n", META);
 	KUNIT_ASSERT_TRUE(test, n > 0 && n < CODE_MAX);
 	KUNIT_ASSERT_EQ(test, lua_lsm_module_register(code, strlen(code)), 0);
+	t0 = ktime_get_ns();
+	ret = lua_lsm_file_open(NULL);
+	t1 = ktime_get_ns();
+	KUNIT_EXPECT_EQ(test, ret, 0);
+	kunit_info(test, "BENCH_EXP name=recovery-load tag=%s ctx=%s cold_ns=%llu\n",
+		   tag, atomic ? "atomic" : "task", t1 - t0);
 	for (k = 0; k < EXP_RECOVERY; k++) {
+		if (atomic)
+			preempt_disable();
 		t0 = ktime_get_ns();
 		ret = lua_lsm_file_open(NULL);
 		t1 = ktime_get_ns();
+		if (atomic)
+			preempt_enable();
 		rec_raw[k] = t1 - t0;
 		KUNIT_EXPECT_EQ(test, ret, 0);
 	}
