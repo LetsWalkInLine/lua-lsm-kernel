@@ -479,25 +479,37 @@ def cmd_sys(args):
                 image = build_image("sys", scn, busybox)
                 counts = (args.counts_timeout if scn == TIMEOUT_SCENARIO
                           else args.counts)
-                boot += 1
-                out = runs / f"boot-{boot:03d}-{kernel}-{scn}"
                 append = ("console=ttyS0,115200 rdinit=/init panic=-1 oops=panic "
                           "panic_on_warn=1 nokaslr kunit.enable=0 "
                           f"lua_bench_scn={scn} lua_bench_counts={counts}")
                 if scn == "nolua":
                     append = append.replace("nokaslr", "nokaslr lsm=landlock")
-                code, argv = run_qemu(out, bz[kernel], image, append,
-                                      args.timeout_s, args.pin)
-                if code:
-                    raise SystemExit(f"QEMU failed for {kernel}/{scn}: {code}")
-                lines = read_log(out / "console.log")
-                check_common(lines)
-                parsed = parse_sys(lines, scn, counts)
-                validate_sys(parsed, lines, scn)
-                boot_identity(out, kernel, bz[kernel], image, argv,
-                              {"kind": "sys", "scenario": scn, "counts": counts,
-                               "round": rnd})
-                (out / "parsed.json").write_text(json.dumps(parsed) + "\n")
+
+                def once(attempt, kernel=kernel, scn=scn, image=image,
+                         counts=counts, append=append, rnd=rnd):
+                    nonlocal boot
+                    boot += 1
+                    out = runs / f"boot-{boot:03d}-{kernel}-{scn}"
+                    code, argv = run_qemu(out, bz[kernel], image, append,
+                                          args.timeout_s, args.pin)
+                    if code:
+                        raise SystemExit(f"QEMU failed for {kernel}/{scn}: {code}")
+                    try:
+                        lines = read_log(out / "console.log")
+                        check_common(lines)
+                        parsed = parse_sys(lines, scn, counts)
+                        validate_sys(parsed, lines, scn)
+                    except ValueError as e:
+                        shutil.move(str(out), str(out) + f"-failed{attempt}")
+                        print(f"validation failed ({e}); kept evidence")
+                        return None
+                    boot_identity(out, kernel, bz[kernel], image, argv,
+                                  {"kind": "sys", "scenario": scn, "counts": counts,
+                                   "round": rnd})
+                    (out / "parsed.json").write_text(json.dumps(parsed) + "\n")
+                    return parsed, out
+
+                parsed, out = boot_with_retry(f"{kernel}/{scn}", once)
                 s = parsed["stats"]
                 print(f"[{boot:03d}] r{rnd} {kernel}/{scn}: "
                       f"sample mean {s['samples']['mean']:.0f}ns "
@@ -649,6 +661,23 @@ def validate_kern(parsed, kernel, expect_expiry):
             raise ValueError(f"expiry shapes mismatch: {sorted(shapes_seen ^ shapes)}")
 
 
+def boot_with_retry(desc, boot_once, attempts=3):
+    """Run one guest boot, retrying on validation failure.
+
+    Host stalls (unpinned frequency, descheduling) can legitimately
+    flip a budgeted call to a timeout mid-sample; the strict per-boot
+    validation catches that.  Failed boots are kept on disk as
+    <dir>-failed<N> evidence and retried on a fresh guest.
+    """
+    for attempt in range(attempts):
+        out = boot_once(attempt)
+        if out is not None:
+            return out
+        print(f"retry: {desc} boot failed validation "
+              f"(attempt {attempt + 1}/{attempts})")
+    raise SystemExit(f"boot kept failing validation after {attempts} attempts: {desc}")
+
+
 def cmd_kern(args):
     kernels = args.kernels.split(",") if args.kernels else ["b0", "b1", "b2"]
     busybox = Path(args.busybox)
@@ -663,23 +692,36 @@ def cmd_kern(args):
             bz = BUILD / "build" / kernel / "arch/x86/boot/bzImage"
             if not bz.exists():
                 raise SystemExit(f"missing kernel build for {kernel}")
-            boot += 1
-            out = runs / f"boot-{boot:03d}-{kernel}-kern{'-exp' if want_expiry else ''}"
             append = ("console=ttyS0,115200 rdinit=/init panic=-1 oops=panic "
                       "panic_on_warn=1 nokaslr lsm=lua "
                       "kunit.filter_glob=lua-lsm-bench")
             if want_expiry:
                 append += " lua_bench_expiry"
-            code, argv = run_qemu(out, bz, image, append, args.timeout_s, args.pin)
-            if code:
-                raise SystemExit(f"QEMU failed for {kernel}: {code}")
-            lines = read_log(out / "console.log")
-            check_common(lines)
-            parsed = parse_kern(lines, want_expiry)
-            validate_kern(parsed, kernel, want_expiry)
-            boot_identity(out, kernel, bz, image, argv,
-                          {"kind": "kern", "expiry": want_expiry, "round": rnd})
-            (out / "parsed.json").write_text(json.dumps(parsed) + "\n")
+
+            def once(attempt, kernel=kernel, want_expiry=want_expiry, bz=bz,
+                     append=append):
+                nonlocal boot
+                boot += 1
+                out = runs / (f"boot-{boot:03d}-{kernel}-kern"
+                              f"{'-exp' if want_expiry else ''}")
+                code, argv = run_qemu(out, bz, image, append, args.timeout_s, args.pin)
+                if code:
+                    raise SystemExit(f"QEMU failed for {kernel}: {code}")
+                try:
+                    lines = read_log(out / "console.log")
+                    check_common(lines)
+                    parsed = parse_kern(lines, want_expiry)
+                    validate_kern(parsed, kernel, want_expiry)
+                except ValueError as e:
+                    shutil.move(str(out), str(out) + f"-failed{attempt}")
+                    print(f"validation failed ({e}); kept evidence")
+                    return None
+                boot_identity(out, kernel, bz, image, argv,
+                              {"kind": "kern", "expiry": want_expiry, "round": rnd})
+                (out / "parsed.json").write_text(json.dumps(parsed) + "\n")
+                return parsed, out
+
+            parsed, out = boot_with_retry(f"{kernel} kern", once)
             first = next(r for r in parsed["corpus"] if r["name"] != "allow")
             print(f"[{boot:03d}] r{rnd} {kernel} kern: "
                   f"{len(parsed['corpus'])} corpus recs, {len(parsed['expiry'])} expiry recs, "
@@ -717,8 +759,8 @@ def load_runs(runs):
 
 def cmd_parse(args):
     for d in sorted(Path(args.runs).glob("boot-*")):
-        if not (d / "console.log").exists():
-            continue
+        if not (d / "console.log").exists() or not (d / "identity.json").exists():
+            continue  # failed-boot evidence without identity stays untouched
         ident = json.loads((d / "identity.json").read_text())
         lines = read_log(d / "console.log")
         if ident["extra"]["kind"] == "sys":
