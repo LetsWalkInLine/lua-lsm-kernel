@@ -157,6 +157,18 @@ def cmd_setup(args):
     unknown = [k for k in selected if k not in KERNELS]
     if unknown or not selected:
         raise SystemExit(f"unknown kernels {unknown}; choose from {sorted(KERNELS)}")
+    head = git("rev-parse", "HEAD").stdout.strip()
+    setup_path = BUILD / "setup.json"
+    identity = {"bench_branch_head": head, "kernels": {}}
+    # A subset setup keeps the records of untouched kernels so later
+    # build/run commands still resolve them.
+    if setup_path.exists():
+        old = json.loads(setup_path.read_text())
+        for k, rec in old.get("kernels", {}).items():
+            if k not in selected:
+                rec = dict(rec)
+                rec.setdefault("setup_head", old.get("bench_branch_head"))
+                identity["kernels"][k] = rec
     bench_files = [
         "security/lua/bench_module.c",
         "tools/testing/selftests/lua_lsm/bench.config",
@@ -165,8 +177,6 @@ def cmd_setup(args):
           for p in sorted(FIXTURES.rglob("*")) if p.is_file()],
     ]
     overlay = FIXTURES / "production-integration.patch"
-    identity = {"bench_branch_head": git("rev-parse", "HEAD").stdout.strip(),
-                "kernels": {}}
     for name in selected:
         commit = kernel_commit(name)
         tree = BUILD / "trees" / name
@@ -186,7 +196,7 @@ def cmd_setup(args):
         sh("patch", "-d", str(tree), "-p1", "--fuzz=0", stdin=open(overlay))
         rec = {"commit": commit,
                "tree": git("rev-parse", commit + "^{tree}").stdout.strip(),
-               "desc": KERNELS[name]["desc"]}
+               "desc": KERNELS[name]["desc"], "setup_head": head}
         if name == "b0":
             diffstat = git("diff", "--stat", B0_BASE, commit).stdout
             assert "luaconf.h | 4" in diffstat, diffstat
@@ -197,9 +207,10 @@ def cmd_setup(args):
                 and parents[2] == B1_STRING, parents
         identity["kernels"][name] = rec
         print(f"{name}: commit {commit[:12]} tree {rec['tree'][:12]} ({rec['desc']})")
-    # The applied integration must be identical on every selected tree.
+    # The applied integration must be identical on every selected tree;
+    # records of untouched kernels are merged verbatim, not rechecked.
     hashes = {}
-    for name in identity["kernels"]:
+    for name in selected:
         hashes[name] = {rel: digest(BUILD / "trees" / name / rel)
                         for rel in ("security/lua/Kconfig", "security/lua/Makefile",
                                     "security/lua/bench_module.c")}
@@ -387,7 +398,7 @@ def check_common(log_lines):
 def values_from_raw(parts):
     out = []
     for part in sorted(parts, key=lambda p: p[0]):
-        out.extend(part[1])
+        out.extend(part[2])
     return out
 
 
@@ -418,13 +429,21 @@ def parse_sys(log_lines, scenario, counts):
             if not m:
                 raise ValueError("bad raw line: " + line)
             vals = [int(x) for x in (m.group(4) or "").split(",") if x]
-            raw[m.group(1)].append((int(m.group(2)), vals))
+            raw[m.group(1)].append((int(m.group(2)), int(m.group(3)), vals))
         elif line.startswith("BENCH_SYS tag=") and " DONE " in line:
             done = True
     if not done:
         raise ValueError("bench-syscall did not finish")
     if len(cold) != ncold:
         raise ValueError(f"cold count {len(cold)} != {ncold}")
+    for tag, want in (("samples", nsample), ("blocks", nblocks)):
+        parts = raw[tag]
+        totals = {total for _, total, _ in parts}
+        idx = sorted(i for i, _, _ in parts)
+        if not parts or len(totals) != 1 or idx != list(range(totals.pop())):
+            raise ValueError(f"{tag} raw parts are incomplete or duplicated: {idx}")
+        if tag not in stats:
+            raise ValueError(f"missing stats line for {tag}")
     samples = values_from_raw(raw["samples"])
     blocks = values_from_raw(raw["blocks"])
     if len(samples) != nsample:
@@ -500,8 +519,15 @@ def cmd_sys(args):
                         parsed = parse_sys(lines, scn, counts)
                         validate_sys(parsed, lines, scn)
                     except ValueError as e:
+                        klass = classify_failure(lines)
+                        record_event(runs, out.name,
+                                     {"class": klass, "kernel": kernel, "kind": "sys",
+                                      "scenario": scn, "round": rnd, "reason": str(e)})
+                        if klass == "measurement":
+                            shutil.move(str(out), str(out) + "-meas")
+                            raise MeasurementEvent(f"{kernel}/{scn}: {e}")
                         shutil.move(str(out), str(out) + f"-failed{attempt}")
-                        print(f"validation failed ({e}); kept evidence")
+                        print(f"acquisition failure ({e}); kept evidence")
                         return None
                     boot_identity(out, kernel, bz[kernel], image, argv,
                                   {"kind": "sys", "scenario": scn, "counts": counts,
@@ -509,7 +535,11 @@ def cmd_sys(args):
                     (out / "parsed.json").write_text(json.dumps(parsed) + "\n")
                     return parsed, out
 
-                parsed, out = boot_with_retry(f"{kernel}/{scn}", once)
+                try:
+                    parsed, out = boot_with_retry(f"{kernel}/{scn}", once)
+                except MeasurementEvent as e:
+                    print(f"measurement event kept, boot skipped: {e}")
+                    continue
                 s = parsed["stats"]
                 print(f"[{boot:03d}] r{rnd} {kernel}/{scn}: "
                       f"sample mean {s['samples']['mean']:.0f}ns "
@@ -520,15 +550,41 @@ def cmd_sys(args):
 OVER_ITEMS = {"escapeover76191", "findover76191", "trimsp1026", "basename4095"}
 
 
+def _finalize_parts(rec, what):
+    """Assemble raw samples from their part lines, verifying the part
+    numbers form exactly 0..N-1 with one consistent count."""
+    vals_by_idx = rec.pop("_partvals", None)
+    totals = rec.pop("_totals", set())
+    if not vals_by_idx:
+        raise ValueError(f"missing raw sample lines for {what}")
+    if len(totals) != 1:
+        raise ValueError(f"inconsistent part counts for {what}: {sorted(totals)}")
+    total = totals.pop()
+    if sorted(vals_by_idx) != list(range(total)):
+        raise ValueError(f"part numbers for {what} are not exactly "
+                         f"0..{total - 1}: {sorted(vals_by_idx)}")
+    rec["raw"] = [v for i in range(total) for v in vals_by_idx[i]]
+
+
 def parse_kern(log_lines, expect_expiry):
     corpus, expiry = [], []
     cur = None
     last_recovery_load = None
     done = set()
+
+    def close(rec, what):
+        if rec is None:
+            return
+        if "stats" not in rec:
+            raise ValueError(f"missing BENCH_STATS line for {what}")
+        _finalize_parts(rec, what)
+
     for line in log_lines:
         if "BENCH_INFO phase=corpus" in line:
+            close(cur, "record")
             cur = None
         elif "BENCH_INFO phase=expiry" in line:
+            close(cur, "record")
             cur = None
         elif "BENCH_DONE phase=" in line:
             done.add(line.split("phase=", 1)[1].strip())
@@ -536,9 +592,10 @@ def parse_kern(log_lines, expect_expiry):
             m = re.search(r"BENCH_STR name=(\S+) v=(\S+) demand=(\d+) cat=(-?\d+) cold_ns=(\d+)", line)
             if not m:
                 raise ValueError("bad BENCH_STR: " + line)
+            close(cur, "previous record")
             cur = {"kind": "str", "name": m.group(1), "variant": m.group(2),
                    "demand": int(m.group(3)), "cat": int(m.group(4)),
-                   "cold_ns": int(m.group(5)), "raw": []}
+                   "cold_ns": int(m.group(5)), "_partvals": {}, "_totals": set()}
             corpus.append(cur)
         elif "BENCH_EXP name=" in line:
             m = re.search(r"BENCH_EXP name=(\S+) tag=(\S+) ctx=(\S+)"
@@ -548,25 +605,32 @@ def parse_kern(log_lines, expect_expiry):
                 raise ValueError("bad BENCH_EXP: " + line)
             name, tag, ctx = m.group(1), m.group(2), m.group(3)
             if name == "allow" and m.group(5):
+                close(cur, "previous record")
                 cur = {"kind": "exp_allow", "shape": tag, "ctx": ctx,
-                       "cold_ns": int(m.group(5)), "raw": []}
+                       "cold_ns": int(m.group(5)), "_partvals": {}, "_totals": set()}
                 expiry.append(cur)
             elif name == "allow":
                 cur["warm_done"] = True
             elif name == "recovery-load":
-                # Informational untimed lazy-load call; its cold time is
-                # attached to the recovery record that follows.
+                # Informational untimed lazy-load call in preemptible
+                # context; its cold time is attached to the recovery
+                # record that follows.
                 last_recovery_load = int(m.group(5) or 0)
+                close(cur, "previous record")
                 cur = None
             elif name == "recovery":
+                close(cur, "previous record")
                 cur = {"kind": "exp_recovery", "shape": tag, "ctx": ctx,
-                       "load_cold_ns": last_recovery_load, "raw": []}
+                       "load_cold_ns": last_recovery_load,
+                       "_partvals": {}, "_totals": set()}
                 last_recovery_load = None
                 expiry.append(cur)
             else:
+                close(cur, "previous record")
                 cur = {"kind": "exp_timeout", "shape": tag, "ctx": ctx,
                        "budget": int(m.group(6) or 0),
-                       "allow_mean": int(m.group(7) or 0), "raw": []}
+                       "allow_mean": int(m.group(7) or 0),
+                       "_partvals": {}, "_totals": set()}
                 expiry.append(cur)
         elif "BENCH_STATS n=" in line:
             m = re.search(r"BENCH_STATS n=(\d+) mean=(\d+) min=(\d+) max=(\d+)", line)
@@ -579,8 +643,12 @@ def parse_kern(log_lines, expect_expiry):
             m = re.search(r"part=(\d+)/(\d+)(?: (.*))?$", line)
             if not m or cur is None:
                 continue
-            vals = [int(x) for x in (m.group(3) or "").split(",") if x]
-            cur["raw"].extend(vals)
+            idx, total = int(m.group(1)), int(m.group(2))
+            if idx in cur["_partvals"]:
+                raise ValueError(f"duplicate part {idx} for current record")
+            cur["_partvals"][idx] = [int(x) for x in (m.group(3) or "").split(",") if x]
+            cur["_totals"].add(total)
+    close(cur, "last record")
     if "corpus" not in done:
         raise ValueError("corpus phase did not complete")
     if expect_expiry and "expiry" not in done:
@@ -661,6 +729,38 @@ def validate_kern(parsed, kernel, expect_expiry):
             raise ValueError(f"expiry shapes mismatch: {sorted(shapes_seen ^ shapes)}")
 
 
+class MeasurementEvent(Exception):
+    """A validation failure caused by a real measured outcome, not by a
+    broken acquisition: e.g. a host stall flipping a budgeted call to a
+    timeout mid-sample.  Recorded, never silently retried."""
+
+
+# Console markers that identify a genuine measurement flip: the kernel
+# module's per-call consistency assertion, or a userspace sample whose
+# return category changed under the VM deadline.
+FLIP_PATTERNS = (
+    "Expected ret == first",
+    re.compile(r"BENCH_(?:COLD|WARMUP|SAMPLE|THROUGH)[^\n]*FAIL"),
+)
+
+
+def classify_failure(log_lines):
+    text = "\n".join(log_lines)
+    for pat in FLIP_PATTERNS:
+        if isinstance(pat, str):
+            if pat in text:
+                return "measurement"
+        elif pat.search(text):
+            return "measurement"
+    return "acquisition"
+
+
+def record_event(runs, name, entry):
+    path = Path(runs) / "run-events.jsonl"
+    with path.open("a") as f:
+        f.write(json.dumps({"boot": name, **entry}) + "\n")
+
+
 def boot_with_retry(desc, boot_once, attempts=3):
     """Run one guest boot, retrying on validation failure.
 
@@ -713,20 +813,30 @@ def cmd_kern(args):
                     parsed = parse_kern(lines, want_expiry)
                     validate_kern(parsed, kernel, want_expiry)
                 except ValueError as e:
+                    klass = classify_failure(lines)
+                    record_event(runs, out.name,
+                                 {"class": klass, "kernel": kernel, "kind": "kern",
+                                  "expiry": want_expiry, "round": rnd, "reason": str(e)})
+                    if klass == "measurement":
+                        shutil.move(str(out), str(out) + "-meas")
+                        raise MeasurementEvent(f"{kernel} kern: {e}")
                     shutil.move(str(out), str(out) + f"-failed{attempt}")
-                    print(f"validation failed ({e}); kept evidence")
+                    print(f"acquisition failure ({e}); kept evidence")
                     return None
                 boot_identity(out, kernel, bz, image, argv,
                               {"kind": "kern", "expiry": want_expiry, "round": rnd})
                 (out / "parsed.json").write_text(json.dumps(parsed) + "\n")
                 return parsed, out
 
-            parsed, out = boot_with_retry(f"{kernel} kern", once)
+            try:
+                parsed, out = boot_with_retry(f"{kernel} kern", once)
+            except MeasurementEvent as e:
+                print(f"measurement event kept, boot skipped: {e}")
+                continue
             first = next(r for r in parsed["corpus"] if r["name"] != "allow")
             print(f"[{boot:03d}] r{rnd} {kernel} kern: "
                   f"{len(parsed['corpus'])} corpus recs, {len(parsed['expiry'])} expiry recs, "
                   f"e.g. {first['name']}/{first['variant']} mean {first['stats']['mean']}ns")
-
 
 # ---------------------------------------------------------------- stats
 
@@ -776,6 +886,18 @@ def cmd_parse(args):
 def cmd_stats(args):
     runs = load_runs(args.runs)
     report = {"sys": {}, "kern_corpus": {}, "kern_expiry": {}}
+    events_path = Path(args.runs) / "run-events.jsonl"
+    if events_path.exists():
+        events = [json.loads(l) for l in events_path.read_text().splitlines()
+                  if l.strip()]
+        grouped = {}
+        for e in events:
+            grouped.setdefault(f"{e.get('kernel')}/{e['class']}", []).append(e["boot"])
+        report["run_events"] = {
+            "total": len(events),
+            "by_kernel_and_class": {k: len(v) for k, v in sorted(grouped.items())},
+            "boots": events,
+        }
     sysdata = {}
     for name, ident, parsed in runs:
         if ident["extra"]["kind"] != "sys":

@@ -298,6 +298,12 @@ static void expiry_cell(struct kunit *test, const char *tag,
 			preempt_enable();
 		exp_raw[k] = t1 - t0;
 		KUNIT_EXPECT_EQ(test, ret, -EIO);
+		/* A genuine deadline exit cannot be shorter than the budget:
+		 * the budget starts after call entry and the error is raised
+		 * at or after the deadline.  Ordinary Lua errors also map to
+		 * -EIO, so this floor is what proves the deadline fired. */
+		KUNIT_EXPECT_TRUE(test, exp_raw[k] >=
+				  (atomic ? BUDGET_ATOMIC_NS : BUDGET_TASK_NS));
 	}
 	{
 		char name[96];
@@ -330,8 +336,10 @@ static void expiry_cell(struct kunit *test, const char *tag,
 	ret = lua_lsm_file_open(NULL);
 	t1 = ktime_get_ns();
 	KUNIT_EXPECT_EQ(test, ret, 0);
-	kunit_info(test, "BENCH_EXP name=recovery-load tag=%s ctx=%s cold_ns=%llu\n",
-		   tag, atomic ? "atomic" : "task", t1 - t0);
+	/* The load call itself runs preemptible even in atomic cells;
+	 * label it accordingly, keep ctx=atomic only for warm samples. */
+	kunit_info(test, "BENCH_EXP name=recovery-load tag=%s ctx=preempt cold_ns=%llu\n",
+		   tag, t1 - t0);
 	for (k = 0; k < EXP_RECOVERY; k++) {
 		if (atomic)
 			preempt_disable();
