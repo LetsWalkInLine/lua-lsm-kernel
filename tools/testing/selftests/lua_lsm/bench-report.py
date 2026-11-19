@@ -133,6 +133,38 @@ def expiry_tables(summary):
     return lines
 
 
+def run_event_tables(summary):
+    """Successful boot counts per kernel plus every recorded event, so
+    skipped rounds stay visible next to the latency tables."""
+    sys_ok, kern_ok = {}, {}
+    for key, entry in summary.get("sys", {}).items():
+        k, scn = key.split("/", 1)
+        sys_ok[k] = sys_ok.get(k, 0) + len(entry["samples"]["per_boot_mean"])
+    for key, entry in summary.get("kern_corpus", {}).items():
+        k = key.split("/", 1)[0]
+        kern_ok[k] = max(kern_ok.get(k, 0), len(entry.get("per_boot_mean", [])))
+    lines = ["### 成功与跳过的轮次", "",
+             "| 内核 | syscall成功boot | kern成功boot | 事件 |",
+             "| --- | ---: | ---: | --- |"]
+    ev = summary.get("run_events") or {}
+    by_class = ev.get("by_kernel_and_class", {})
+    for k in sorted(set(sys_ok) | set(kern_ok) | {c.split("/")[0] for c in by_class}):
+        counts = ", ".join(f"{c.split('/', 1)[1]}×{n}"
+                           for c, n in sorted(by_class.items()) if c.startswith(k + "/"))
+        lines.append(f"| {k} | {sys_ok.get(k, 0)} | {kern_ok.get(k, 0)} | "
+                     f"{counts or '-'} |")
+    if ev.get("boots"):
+        lines += ["", "| 类别 | boot | 场景 | 原因 |", "| --- | --- | --- | --- |"]
+        for e in ev["boots"]:
+            where = e.get("scenario") or ("kern" + ("-exp" if e.get("expiry") else ""))
+            reason = e.get("reason", "")[:70].replace("|", "/")
+            lines.append(f"| {e['class']} | {e['boot']} | "
+                         f"{e.get('kernel')}/{where} | {reason} |")
+    else:
+        lines += ["", "无记录的失败或跳过轮次。"]
+    return lines
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--runs", required=True)
@@ -145,6 +177,7 @@ def main():
     print("\n".join(corpus))
     expiry = expiry_tables(summary)
     print("\n".join(expiry))
+    print("\n".join(run_event_tables(summary)))
 
 
 if __name__ == "__main__":

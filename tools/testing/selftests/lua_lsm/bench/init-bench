@@ -68,8 +68,13 @@ log "LUA_BENCH: scenario $SCN expect $EXPECT"
 set -- $COUNTS_ARGS
 # Program output goes to a file and is emitted after exit: the tty layer
 # flushes userspace writes asynchronously and printk would otherwise
-# wedge itself into the middle of raw sample lines.
-/bench-syscall "$SCN" /bench-target "$EXPECT" "$1" "$2" "$3" "$4" "$5" > /bench-out.txt || fail 'bench-syscall failed'
+# wedge itself into the middle of raw sample lines.  On failure the file
+# is emitted too, so the host sees the failing sample line and can
+# classify the failure instead of retrying a real measurement event.
+if ! /bench-syscall "$SCN" /bench-target "$EXPECT" "$1" "$2" "$3" "$4" "$5" > /bench-out.txt; then
+	cat /bench-out.txt
+	fail 'bench-syscall failed'
+fi
 cat /bench-out.txt
 if dmesg | grep -qE 'BUG:|WARNING:|Oops:|Kernel panic|KASAN:|UBSAN:'; then
 	dmesg | tail -80

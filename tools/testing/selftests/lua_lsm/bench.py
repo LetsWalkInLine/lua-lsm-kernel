@@ -78,6 +78,29 @@ def git(*argv, check=True):
     return sh("git", "-C", str(REPO), *argv, check=check)
 
 
+def integration_hashes(tree):
+    return {rel: digest(tree / rel)
+            for rel in ("security/lua/Kconfig", "security/lua/Makefile",
+                        "security/lua/bench_module.c")}
+
+
+def verify_integration(names):
+    """Refuse comparisons across mixed benchmark code versions: the
+    trees of every kernel about to be built or compared must carry a
+    byte-identical bench integration."""
+    hashes = {}
+    for name in names:
+        tree = BUILD / "trees" / name
+        if not tree.is_dir():
+            raise SystemExit(f"missing benchmark tree for {name}; run setup")
+        hashes[name] = integration_hashes(tree)
+    first = hashes[names[0]]
+    mixed = {n: h for n, h in hashes.items() if h != first}
+    if mixed:
+        raise SystemExit("mixed benchmark integration across kernels; "
+                         f"re-run setup for all of {names}: {mixed}")
+
+
 # ---------------------------------------------------------------- setup
 
 def make_b0():
@@ -209,13 +232,15 @@ def cmd_setup(args):
         print(f"{name}: commit {commit[:12]} tree {rec['tree'][:12]} ({rec['desc']})")
     # The applied integration must be identical on every selected tree;
     # records of untouched kernels are merged verbatim, not rechecked.
+    # Each kernel record carries its own integration hash so mixed
+    # versions are detectable before any comparison or build.
     hashes = {}
     for name in selected:
-        hashes[name] = {rel: digest(BUILD / "trees" / name / rel)
-                        for rel in ("security/lua/Kconfig", "security/lua/Makefile",
-                                    "security/lua/bench_module.c")}
+        hashes[name] = integration_hashes(BUILD / "trees" / name)
     baseline = hashes[selected[0]]
     assert all(h == baseline for h in hashes.values()), hashes
+    for name in selected:
+        identity["kernels"][name]["integration_sha256"] = baseline
     identity["integration_sha256"] = baseline
     (BUILD / "setup.json").write_text(json.dumps(identity, indent=2) + "\n")
     print("Setup complete:", BUILD / "setup.json")
@@ -225,6 +250,8 @@ def cmd_setup(args):
 
 def cmd_build(args):
     setup = json.loads((BUILD / "setup.json").read_text())
+    selected = args.kernels.split(",") if args.kernels else ["b0", "b1", "b2"]
+    verify_integration(selected)
     cc = os.environ.get("CC", "ccache gcc")
     # The tools/endian.h stub under scripts/include shadows the system
     # header and leaves BYTE_ORDER undefined, which silently breaks the
@@ -480,6 +507,7 @@ def cmd_sys(args):
     if args.timeout:
         scenarios = scenarios + [TIMEOUT_SCENARIO]
     kernels = args.kernels.split(",") if args.kernels else ["b0", "b1", "b2"]
+    verify_integration(kernels)
     busybox = Path(args.busybox)
     bz = {k: BUILD / "build" / k / "arch/x86/boot/bzImage" for k in kernels}
     for k, p in bz.items():
@@ -523,9 +551,9 @@ def cmd_sys(args):
                         record_event(runs, out.name,
                                      {"class": klass, "kernel": kernel, "kind": "sys",
                                       "scenario": scn, "round": rnd, "reason": str(e)})
-                        if klass == "measurement":
-                            shutil.move(str(out), str(out) + "-meas")
-                            raise MeasurementEvent(f"{kernel}/{scn}: {e}")
+                        if klass in ("measurement", "diagnostic"):
+                            shutil.move(str(out), str(out) + f"-{klass}")
+                            raise MeasurementEvent(f"{kernel}/{scn} [{klass}]: {e}")
                         shutil.move(str(out), str(out) + f"-failed{attempt}")
                         print(f"acquisition failure ({e}); kept evidence")
                         return None
@@ -610,6 +638,9 @@ def parse_kern(log_lines, expect_expiry):
                        "cold_ns": int(m.group(5)), "_partvals": {}, "_totals": set()}
                 expiry.append(cur)
             elif name == "allow":
+                if (cur is None or cur.get("kind") != "exp_allow"
+                        or cur["shape"] != tag or cur["ctx"] != ctx):
+                    raise ValueError(f"allow warm line without its cold header: {line}")
                 cur["warm_done"] = True
             elif name == "recovery-load":
                 # Informational untimed lazy-load call in preemptible
@@ -743,8 +774,22 @@ FLIP_PATTERNS = (
     re.compile(r"BENCH_(?:COLD|WARMUP|SAMPLE|THROUGH)[^\n]*FAIL"),
 )
 
+# Guest-side diagnostics: kernel warnings and KUnit assertion failures
+# are product or setup problems, never acquisition noise, and must not
+# be auto-retried away.
+DIAGNOSTIC_PATTERNS = (
+    re.compile(r"(?:BUG:|WARNING:|Oops:|Kernel panic|KASAN:|UBSAN:)"),
+    re.compile(r"(?:EXPECTATION|ASSERTION) FAILED"),
+    re.compile(r"\bnot ok \d"),
+)
+
 
 def classify_failure(log_lines):
+    """Classify a failed boot: measurement, diagnostic or acquisition.
+
+    Only 'acquisition' boots are auto-retried; the other classes are
+    recorded and skipped.  Flips are checked first because their boots
+    also contain KUnit failure markers."""
     text = "\n".join(log_lines)
     for pat in FLIP_PATTERNS:
         if isinstance(pat, str):
@@ -752,6 +797,9 @@ def classify_failure(log_lines):
                 return "measurement"
         elif pat.search(text):
             return "measurement"
+    for pat in DIAGNOSTIC_PATTERNS:
+        if pat.search(text):
+            return "diagnostic"
     return "acquisition"
 
 
@@ -780,6 +828,7 @@ def boot_with_retry(desc, boot_once, attempts=3):
 
 def cmd_kern(args):
     kernels = args.kernels.split(",") if args.kernels else ["b0", "b1", "b2"]
+    verify_integration(kernels)
     busybox = Path(args.busybox)
     image = build_image("kunit", None, busybox)
     runs = Path(args.runs)
@@ -817,9 +866,9 @@ def cmd_kern(args):
                     record_event(runs, out.name,
                                  {"class": klass, "kernel": kernel, "kind": "kern",
                                   "expiry": want_expiry, "round": rnd, "reason": str(e)})
-                    if klass == "measurement":
-                        shutil.move(str(out), str(out) + "-meas")
-                        raise MeasurementEvent(f"{kernel} kern: {e}")
+                    if klass in ("measurement", "diagnostic"):
+                        shutil.move(str(out), str(out) + f"-{klass}")
+                        raise MeasurementEvent(f"{kernel} kern [{klass}]: {e}")
                     shutil.move(str(out), str(out) + f"-failed{attempt}")
                     print(f"acquisition failure ({e}); kept evidence")
                     return None
@@ -863,7 +912,7 @@ def load_runs(runs):
         if pj.exists() and ij.exists():
             out.append((d.name, json.loads(ij.read_text()), json.loads(pj.read_text())))
     if not out:
-        raise SystemExit("no parsed runs under " + str(runs))
+        print("warning: no parsed boots under", runs)
     return out
 
 
@@ -898,6 +947,8 @@ def cmd_stats(args):
             "by_kernel_and_class": {k: len(v) for k, v in sorted(grouped.items())},
             "boots": events,
         }
+    if not runs and "run_events" not in report:
+        raise SystemExit(f"no parsed boots and no run events under {args.runs}")
     sysdata = {}
     for name, ident, parsed in runs:
         if ident["extra"]["kind"] != "sys":
