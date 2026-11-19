@@ -119,10 +119,14 @@ def make_b1():
         shutil.rmtree(tmpdir)
     sh("git", "-C", str(REPO), "worktree", "add", "--detach", str(tmpdir), B0_BASE)
     try:
+        # Complete author and committer identity: a clean checkout has
+        # no repository-local git identity to fall back on.
         env = dict(os.environ, GIT_COMMITTER_DATE="2026-11-16T00:00:00+00:00",
                    GIT_AUTHOR_DATE="2026-11-16T00:00:00+00:00",
                    GIT_AUTHOR_NAME="Lua-LSM benchmark",
-                   GIT_AUTHOR_EMAIL="benchmark@lua-lsm.invalid")
+                   GIT_AUTHOR_EMAIL="benchmark@lua-lsm.invalid",
+                   GIT_COMMITTER_NAME="Lua-LSM benchmark",
+                   GIT_COMMITTER_EMAIL="benchmark@lua-lsm.invalid")
         subprocess.run(["git", "-C", str(tmpdir), "merge", "--no-edit", "-m",
                         "Merge string limits 53b3c7256 for benchmark B1\n\n"
                         "Benchmark B1 base: error handling f73 plus the full\n"
